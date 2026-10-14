@@ -135,6 +135,7 @@ def top_up(request: TopUpRequest):
     conn.close()
     return {"message": "Top up successful", "new_balance": new_balance}
 
+# ==================== REFERENCE DATA ENDPOINTS ====================
 @app.get("/api/countries")
 def get_countries():
     params = {"api_key": API_KEY, "action": "getCountries"}
@@ -144,6 +145,17 @@ def get_countries():
         return response.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch countries: {str(e)}")
+
+@app.get("/api/services")
+def get_services():
+    """Returns the full list of services supported by HeroSMS."""
+    params = {"api_key": API_KEY, "action": "getServicesList", "lang": "en"}
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch services: {str(e)}")
 
 @app.get("/api/prices")
 def get_prices(service: str = None, country: int = None):
@@ -159,6 +171,7 @@ def get_prices(service: str = None, country: int = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch prices: {str(e)}")
 
+# ==================== NUMBER ENDPOINTS ====================
 @app.post("/api/buy-number")
 def buy_number(request: BuyRequest):
     conn = sqlite3.connect(DB_FILE)
@@ -237,7 +250,7 @@ def cancel_activation(activation_id: str):
     requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id})
     return {"message": "Activation cancelled"}
 
-# ==================== NEW: ACTIVE NUMBER RECOVERY ====================
+# ==================== ACTIVE NUMBER RECOVERY ====================
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int):
     """Returns the current PENDING transaction, if any."""
@@ -265,6 +278,7 @@ def get_active(user_id: int):
         "created_at": row[4],
     }
 
+# ==================== HISTORY ====================
 @app.get("/api/history/{user_id}")
 def get_history(user_id: int):
     conn = sqlite3.connect(DB_FILE)
