@@ -18,9 +18,7 @@ app.add_middleware(
 )
 
 # --- CONFIG ---
-# Read the API key from environment variables (for Render deployment).
-# Falls back to a hardcoded value for LOCAL testing only.
-API_KEY = os.getenv("API_KEY", "1dfe74d57c5454488231c9c5d4391c6e")
+API_KEY = os.getenv("API_KEY", "PASTE_YOUR_HERO_SMS_API_KEY_HERE")
 BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
 DB_FILE = "grizzly.db"
 PROFIT_MARGIN = 0.20
@@ -238,6 +236,34 @@ def cancel_activation(activation_id: str):
     conn.close()
     requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id})
     return {"message": "Activation cancelled"}
+
+# ==================== NEW: ACTIVE NUMBER RECOVERY ====================
+@app.get("/api/active/{user_id}")
+def get_active(user_id: int):
+    """Returns the current PENDING transaction, if any."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT activation_id, phone_number, service, country, created_at 
+           FROM transactions 
+           WHERE user_id = ? AND status = 'PENDING' 
+           ORDER BY created_at DESC LIMIT 1""",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {"has_active": False}
+
+    return {
+        "has_active": True,
+        "activation_id": row[0],
+        "phone_number": row[1],
+        "service": row[2],
+        "country": row[3],
+        "created_at": row[4],
+    }
 
 @app.get("/api/history/{user_id}")
 def get_history(user_id: int):
