@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,7 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIG ---67fAb6dc5806f0bf23fc40148f811543"  # <-- Replace this!
+# --- CONFIG ---
+# Read the API key from environment variables (for Render deployment).
+# Falls back to a hardcoded value for LOCAL testing only.
+API_KEY = os.getenv("API_KEY", "1dfe74d57c5454488231c9c5d4391c6e")
 BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
 DB_FILE = "grizzly.db"
 PROFIT_MARGIN = 0.20
