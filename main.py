@@ -5,6 +5,8 @@ from pydantic import BaseModel
 import requests
 import sqlite3
 import hashlib
+import random
+import string
 
 app = FastAPI()
 
@@ -18,10 +20,13 @@ app.add_middleware(
 )
 
 # --- CONFIG ---
-API_KEY = os.getenv("API_KEY", "PASTE_YOUR_HERO_SMS_API_KEY_HERE")
+API_KEY = os.getenv("API_KEY", "A5206AcbA110e26be7c1dAed5A029bb5")
 BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
 DB_FILE = "grizzly.db"
 PROFIT_MARGIN = 0.20
+
+REFERRAL_BONUS = 0.50     # Amount each user gets when a referral works
+STARTING_BALANCE = 0.00   # New users start with 0 unless they use a referral code
 
 # ==================== DATABASE SETUP ====================
 def init_db():
@@ -32,7 +37,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            balance REAL DEFAULT 0.50,
+            balance REAL DEFAULT 0.0,
+            referral_code TEXT UNIQUE,
+            referred_by INTEGER,
+            referral_count INTEGER DEFAULT 0,
+            referral_earnings REAL DEFAULT 0.0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -59,10 +68,26 @@ init_db()
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+def generate_referral_code() -> str:
+    """Generate a code like FBG-X7K9M2"""
+    chars = string.ascii_uppercase + string.digits
+    suffix = ''.join(random.choices(chars, k=6))
+    return f"FBG-{suffix}"
+
+def make_unique_code(cursor) -> str:
+    """Keep generating until we find one not in the DB."""
+    for _ in range(20):
+        code = generate_referral_code()
+        cursor.execute("SELECT id FROM users WHERE referral_code = ?", (code,))
+        if not cursor.fetchone():
+            return code
+    raise Exception("Could not generate unique referral code")
+
 # ==================== MODELS ====================
 class RegisterRequest(BaseModel):
     email: str
     password: str
+    referral_code: str = ""  # optional
 
 class LoginRequest(BaseModel):
     email: str
@@ -93,34 +118,109 @@ def register(request: RegisterRequest):
     if cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=400, detail="This email is already registered. Try logging in.")
-    cursor.execute("INSERT INTO users (email, password_hash) VALUES (?, ?)", (email, hash_password(password)))
+
+    # Check referral code (if provided)
+    referrer_id = None
+    entered_code = (request.referral_code or "").strip().upper()
+    if entered_code:
+        cursor.execute("SELECT id FROM users WHERE referral_code = ?", (entered_code,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Invalid referral code. Please check and try again.")
+        referrer_id = row[0]
+
+    # Generate unique referral code for the new user
+    new_code = make_unique_code(cursor)
+
+    # Starting balance depends on whether they used a referral code
+    start_balance = REFERRAL_BONUS if referrer_id else STARTING_BALANCE
+
+    # Insert new user
+    cursor.execute(
+        """INSERT INTO users (email, password_hash, balance, referral_code, referred_by)
+           VALUES (?, ?, ?, ?, ?)""",
+        (email, hash_password(password), start_balance, new_code, referrer_id)
+    )
+    new_user_id = cursor.lastrowid
+
+    # If they used a referral code, credit the referrer too
+    if referrer_id:
+        cursor.execute(
+            """UPDATE users 
+               SET balance = balance + ?, 
+                   referral_count = referral_count + 1,
+                   referral_earnings = referral_earnings + ?
+               WHERE id = ?""",
+            (REFERRAL_BONUS, REFERRAL_BONUS, referrer_id)
+        )
+
     conn.commit()
-    user_id = cursor.lastrowid
     conn.close()
-    return {"user_id": user_id, "email": email, "balance": 0.50}
+
+    return {
+        "user_id": new_user_id,
+        "email": email,
+        "balance": start_balance,
+        "referral_code": new_code,
+        "used_referral": bool(referrer_id),
+    }
 
 @app.post("/api/login")
 def login(request: LoginRequest):
     email = request.email.strip().lower()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, balance FROM users WHERE email = ? AND password_hash = ?", (email, hash_password(request.password)))
+    cursor.execute(
+        "SELECT id, balance, referral_code FROM users WHERE email = ? AND password_hash = ?",
+        (email, hash_password(request.password))
+    )
     user = cursor.fetchone()
     conn.close()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
-    return {"user_id": user[0], "email": email, "balance": user[1]}
+    return {"user_id": user[0], "email": email, "balance": user[1], "referral_code": user[2]}
 
 @app.get("/api/user/{user_id}")
 def get_user(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, email, balance FROM users WHERE id = ?", (user_id,))
+    cursor.execute(
+        "SELECT id, email, balance, referral_code, referral_count, referral_earnings FROM users WHERE id = ?",
+        (user_id,)
+    )
     user = cursor.fetchone()
     conn.close()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user_id": user[0], "email": user[1], "balance": user[2]}
+    return {
+        "user_id": user[0],
+        "email": user[1],
+        "balance": user[2],
+        "referral_code": user[3] or "",
+        "referral_count": user[4] or 0,
+        "referral_earnings": user[5] or 0.0,
+    }
+
+# ==================== REFERRAL INFO ====================
+@app.get("/api/referral/{user_id}")
+def get_referral_info(user_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT referral_code, referral_count, referral_earnings FROM users WHERE id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "referral_code": row[0] or "",
+        "referral_count": row[1] or 0,
+        "referral_earnings": row[2] or 0.0,
+        "bonus_per_referral": REFERRAL_BONUS,
+    }
 
 @app.post("/api/topup")
 def top_up(request: TopUpRequest):
@@ -148,7 +248,6 @@ def get_countries():
 
 @app.get("/api/services")
 def get_services():
-    """Returns the full list of services supported by HeroSMS."""
     params = {"api_key": API_KEY, "action": "getServicesList", "lang": "en"}
     try:
         response = requests.get(BASE_URL, params=params, timeout=15)
@@ -253,7 +352,6 @@ def cancel_activation(activation_id: str):
 # ==================== ACTIVE NUMBER RECOVERY ====================
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int):
-    """Returns the current PENDING transaction, if any."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(
@@ -265,10 +363,8 @@ def get_active(user_id: int):
     )
     row = cursor.fetchone()
     conn.close()
-
     if not row:
         return {"has_active": False}
-
     return {
         "has_active": True,
         "activation_id": row[0],
