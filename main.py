@@ -46,7 +46,6 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Added is_verified and verification_code
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -160,7 +159,7 @@ def request_code(request: EmailRequest):
 
     try:
         resend.Emails.send({
-            "from": "from": "noreply@fbgsmsactivate.com",
+            "from": "noreply@fbgsmsactivate.com",
             "to": email,
             "subject": "Your FBG SMS Verification Code",
             "html": f"<p>Your verification code is: <strong>{code}</strong></p><p>If you didn't request this, ignore this email.</p>"
@@ -209,7 +208,7 @@ def forgot_password(request: EmailRequest):
 
     try:
         resend.Emails.send({
-            "from": "from": "noreply@fbgsmsactivate.com",
+            "from": "noreply@fbgsmsactivate.com",
             "to": email,
             "subject": "FBG SMS Password Reset",
             "html": f"<p>Your password reset code is: <strong>{code}</strong></p>"
