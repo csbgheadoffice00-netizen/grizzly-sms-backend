@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import random
 import string
+from nowpayments import NOWPayments
 
 app = FastAPI()
 
@@ -20,13 +21,17 @@ app.add_middleware(
 )
 
 # --- CONFIG ---
-API_KEY = os.getenv("API_KEY", "A5206AcbA110e26be7c1dAed5A029bb5")
+API_KEY = os.getenv("API_KEY", "PASTE_YOUR_HERO_SMS_API_KEY_HERE")
 BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
 DB_FILE = "grizzly.db"
 PROFIT_MARGIN = 0.20
+REFERRAL_BONUS = 0.50
+STARTING_BALANCE = 0.00
 
-REFERRAL_BONUS = 0.50     # Amount each user gets when a referral works
-STARTING_BALANCE = 0.00   # New users start with 0 unless they use a referral code
+# NOWPayments Config
+NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
+NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
+np_client = NOWPayments(api_key=NP_API_KEY, ipn_secret=NP_IPN_SECRET)
 
 # ==================== DATABASE SETUP ====================
 def init_db():
@@ -60,6 +65,16 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id TEXT UNIQUE,
+            user_id INTEGER NOT NULL,
+            amount REAL,
+            status TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -69,13 +84,11 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 def generate_referral_code() -> str:
-    """Generate a code like FBG-X7K9M2"""
     chars = string.ascii_uppercase + string.digits
     suffix = ''.join(random.choices(chars, k=6))
     return f"FBG-{suffix}"
 
 def make_unique_code(cursor) -> str:
-    """Keep generating until we find one not in the DB."""
     for _ in range(20):
         code = generate_referral_code()
         cursor.execute("SELECT id FROM users WHERE referral_code = ?", (code,))
@@ -87,7 +100,7 @@ def make_unique_code(cursor) -> str:
 class RegisterRequest(BaseModel):
     email: str
     password: str
-    referral_code: str = ""  # optional
+    referral_code: str = ""
 
 class LoginRequest(BaseModel):
     email: str
@@ -119,7 +132,6 @@ def register(request: RegisterRequest):
         conn.close()
         raise HTTPException(status_code=400, detail="This email is already registered. Try logging in.")
 
-    # Check referral code (if provided)
     referrer_id = None
     entered_code = (request.referral_code or "").strip().upper()
     if entered_code:
@@ -127,16 +139,12 @@ def register(request: RegisterRequest):
         row = cursor.fetchone()
         if not row:
             conn.close()
-            raise HTTPException(status_code=400, detail="Invalid referral code. Please check and try again.")
+            raise HTTPException(status_code=400, detail="Invalid referral code.")
         referrer_id = row[0]
 
-    # Generate unique referral code for the new user
     new_code = make_unique_code(cursor)
-
-    # Starting balance depends on whether they used a referral code
     start_balance = REFERRAL_BONUS if referrer_id else STARTING_BALANCE
 
-    # Insert new user
     cursor.execute(
         """INSERT INTO users (email, password_hash, balance, referral_code, referred_by)
            VALUES (?, ?, ?, ?, ?)""",
@@ -144,37 +152,22 @@ def register(request: RegisterRequest):
     )
     new_user_id = cursor.lastrowid
 
-    # If they used a referral code, credit the referrer too
     if referrer_id:
         cursor.execute(
-            """UPDATE users 
-               SET balance = balance + ?, 
-                   referral_count = referral_count + 1,
-                   referral_earnings = referral_earnings + ?
-               WHERE id = ?""",
+            """UPDATE users SET balance = balance + ?, referral_count = referral_count + 1, referral_earnings = referral_earnings + ? WHERE id = ?""",
             (REFERRAL_BONUS, REFERRAL_BONUS, referrer_id)
         )
 
     conn.commit()
     conn.close()
-
-    return {
-        "user_id": new_user_id,
-        "email": email,
-        "balance": start_balance,
-        "referral_code": new_code,
-        "used_referral": bool(referrer_id),
-    }
+    return {"user_id": new_user_id, "email": email, "balance": start_balance, "referral_code": new_code}
 
 @app.post("/api/login")
 def login(request: LoginRequest):
     email = request.email.strip().lower()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, balance, referral_code FROM users WHERE email = ? AND password_hash = ?",
-        (email, hash_password(request.password))
-    )
+    cursor.execute("SELECT id, balance, referral_code FROM users WHERE email = ? AND password_hash = ?", (email, hash_password(request.password)))
     user = cursor.fetchone()
     conn.close()
     if not user:
@@ -185,92 +178,134 @@ def login(request: LoginRequest):
 def get_user(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, email, balance, referral_code, referral_count, referral_earnings FROM users WHERE id = ?",
-        (user_id,)
-    )
+    cursor.execute("SELECT id, email, balance, referral_code, referral_count, referral_earnings FROM users WHERE id = ?", (user_id,))
     user = cursor.fetchone()
     conn.close()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {
-        "user_id": user[0],
-        "email": user[1],
-        "balance": user[2],
-        "referral_code": user[3] or "",
-        "referral_count": user[4] or 0,
-        "referral_earnings": user[5] or 0.0,
-    }
+    return {"user_id": user[0], "email": user[1], "balance": user[2], "referral_code": user[3] or "", "referral_count": user[4] or 0, "referral_earnings": user[5] or 0.0}
 
-# ==================== REFERRAL INFO ====================
 @app.get("/api/referral/{user_id}")
 def get_referral_info(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT referral_code, referral_count, referral_earnings FROM users WHERE id = ?",
-        (user_id,)
-    )
+    cursor.execute("SELECT referral_code, referral_count, referral_earnings FROM users WHERE id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
-    return {
-        "referral_code": row[0] or "",
-        "referral_count": row[1] or 0,
-        "referral_earnings": row[2] or 0.0,
-        "bonus_per_referral": REFERRAL_BONUS,
-    }
+    return {"referral_code": row[0] or "", "referral_count": row[1] or 0, "referral_earnings": row[2] or 0.0, "bonus_per_referral": REFERRAL_BONUS}
 
-@app.post("/api/topup")
-def top_up(request: TopUpRequest):
+# ==================== PAYMENT ENDPOINTS ====================
+@app.post("/api/payment/create-invoice")
+async def create_invoice(request: TopUpRequest):
     if request.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive.")
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (request.amount, request.user_id))
-    conn.commit()
-    cursor.execute("SELECT balance FROM users WHERE id = ?", (request.user_id,))
-    new_balance = cursor.fetchone()[0]
-    conn.close()
-    return {"message": "Top up successful", "new_balance": new_balance}
+    
+    # NOWPayments minimum is usually $1 (or crypto equivalent)
+    if request.amount < 1.0:
+        raise HTTPException(status_code=400, detail="Minimum top up is $1.00")
 
-# ==================== REFERENCE DATA ENDPOINTS ====================
+    try:
+        # We use a unique order ID to track this payment
+        order_id = f"user_{request.user_id}_{int(random.random() * 1000000)}"
+        
+        # Create the invoice
+        invoice = np_client.create_invoice(
+            price_amount=request.amount,
+            price_currency="usd",
+            order_id=order_id,
+            order_description=f"FBG SMS Wallet Top-Up for User {request.user_id}",
+            ipn_callback_url="https://grizzly-sms-backend.onrender.com/api/payment/webhook",
+            success_url="https://fbgsms.netlify.app/",
+            cancel_url="https://fbgsms.netlify.app/"
+        )
+        
+        # Save pending payment to DB
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (?, ?, ?, ?)",
+            (str(invoice['id']), request.user_id, request.amount, 'waiting')
+        )
+        conn.commit()
+        conn.close()
+
+        return {"invoice_url": invoice['invoice_url']}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
+
+@app.post("/api/payment/webhook")
+async def payment_webhook(request: Request):
+    """Listens for NOWPayments confirmations and credits the wallet."""
+    payload = await request.json()
+    signature = request.headers.get("x-nowpayments-sig")
+    
+    # Verify the signature to prevent fake webhooks
+    if not np_client.verify_ipn_signature(payload, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    payment_status = payload.get("payment_status")
+    order_id = payload.get("order_id")
+    payment_id = str(payload.get("payment_id"))
+    price_amount = payload.get("price_amount")
+
+    # If payment is finished, credit the user
+    if payment_status in ["finished", "confirmed"]:
+        # order_id format: user_123_45678
+        try:
+            user_id = int(order_id.split("_")[1])
+        except (IndexError, ValueError):
+            return {"status": "error", "message": "Invalid order_id format"}
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Check if we already processed this payment
+        cursor.execute("SELECT status FROM payments WHERE payment_id = ?", (payment_id,))
+        row = cursor.fetchone()
+        
+        if row and row[0] != 'finished':
+            # Update payment status
+            cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = ?", (payment_id,))
+            # Add balance to user
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (price_amount, user_id))
+            conn.commit()
+            
+        conn.close()
+
+    return {"status": "success"}
+
+# ==================== REFERENCE DATA & NUMBER ENDPOINTS ====================
 @app.get("/api/countries")
 def get_countries():
     params = {"api_key": API_KEY, "action": "getCountries"}
     try:
         response = requests.get(BASE_URL, params=params, timeout=10)
-        response.raise_for_status()
         return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch countries: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/services")
 def get_services():
     params = {"api_key": API_KEY, "action": "getServicesList", "lang": "en"}
     try:
         response = requests.get(BASE_URL, params=params, timeout=15)
-        response.raise_for_status()
         return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch services: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/prices")
 def get_prices(service: str = None, country: int = None):
     params = {"api_key": API_KEY, "action": "getPrices"}
-    if service:
-        params["service"] = service
-    if country:
-        params["country"] = country
+    if service: params["service"] = service
+    if country: params["country"] = country
     try:
         response = requests.get(BASE_URL, params=params, timeout=10)
-        response.raise_for_status()
         return response.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch prices: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== NUMBER ENDPOINTS ====================
 @app.post("/api/buy-number")
 def buy_number(request: BuyRequest):
     conn = sqlite3.connect(DB_FILE)
@@ -289,7 +324,7 @@ def buy_number(request: BuyRequest):
         final_price = round(cost + PROFIT_MARGIN, 2)
     except (KeyError, TypeError):
         conn.close()
-        raise HTTPException(status_code=400, detail="This service is currently unavailable for the selected country.")
+        raise HTTPException(status_code=400, detail="Unavailable")
 
     if user[0] < final_price:
         conn.close()
@@ -302,15 +337,10 @@ def buy_number(request: BuyRequest):
         raise HTTPException(status_code=400, detail=response.text)
 
     parts = response.text.split(":")
-    activation_id = parts[1]
-    phone_number = parts[2]
+    activation_id, phone_number = parts[1], parts[2]
 
     cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (final_price, request.user_id))
-    cursor.execute(
-        """INSERT INTO transactions (user_id, activation_id, phone_number, service, country, status, cost)
-           VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""",
-        (request.user_id, activation_id, phone_number, request.service, request.country, final_price)
-    )
+    cursor.execute("""INSERT INTO transactions (user_id, activation_id, phone_number, service, country, status, cost) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""", (request.user_id, activation_id, phone_number, request.service, request.country, final_price))
     conn.commit()
     conn.close()
     return {"activation_id": activation_id, "phone_number": phone_number, "price": final_price}
@@ -349,47 +379,22 @@ def cancel_activation(activation_id: str):
     requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id})
     return {"message": "Activation cancelled"}
 
-# ==================== ACTIVE NUMBER RECOVERY ====================
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        """SELECT activation_id, phone_number, service, country, created_at 
-           FROM transactions 
-           WHERE user_id = ? AND status = 'PENDING' 
-           ORDER BY created_at DESC LIMIT 1""",
-        (user_id,)
-    )
+    cursor.execute("SELECT activation_id, phone_number, service, country, created_at FROM transactions WHERE user_id = ? AND status = 'PENDING' ORDER BY created_at DESC LIMIT 1", (user_id,))
     row = cursor.fetchone()
     conn.close()
     if not row:
         return {"has_active": False}
-    return {
-        "has_active": True,
-        "activation_id": row[0],
-        "phone_number": row[1],
-        "service": row[2],
-        "country": row[3],
-        "created_at": row[4],
-    }
+    return {"has_active": True, "activation_id": row[0], "phone_number": row[1], "service": row[2], "country": row[3], "created_at": row[4]}
 
-# ==================== HISTORY ====================
 @app.get("/api/history/{user_id}")
 def get_history(user_id: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute(
-        """SELECT id, phone_number, service, country, status, sms_code, cost, created_at 
-           FROM transactions WHERE user_id = ? ORDER BY created_at DESC""",
-        (user_id,)
-    )
+    cursor.execute("SELECT id, phone_number, service, country, status, sms_code, cost, created_at FROM transactions WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
     rows = cursor.fetchall()
     conn.close()
-    history = []
-    for row in rows:
-        history.append({
-            "id": row[0], "phone_number": row[1], "service": row[2], "country": row[3],
-            "status": row[4], "sms_code": row[5], "cost": row[6], "created_at": row[7]
-        })
-    return {"history": history}
+    return {"history": [{"id": r[0], "phone_number": r[1], "service": r[2], "country": r[3], "status": r[4], "sms_code": r[5], "cost": r[6], "created_at": r[7]} for r in rows]}
