@@ -3,3 +3,4 @@ uvicorn
 requests
 pydantic
 nowpayments
+psycopg2-binary
