@@ -7,7 +7,8 @@ import sqlite3
 import hashlib
 import random
 import string
-from nowpayments import NOWPayments
+import hmac
+import json
 
 app = FastAPI()
 
@@ -31,7 +32,6 @@ STARTING_BALANCE = 0.00
 # NOWPayments Config
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
 NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
-np_client = NOWPayments(api_key=NP_API_KEY, ipn_secret=NP_IPN_SECRET)
 
 # ==================== DATABASE SETUP ====================
 def init_db():
@@ -201,48 +201,52 @@ def get_referral_info(user_id: int):
 async def create_invoice(request: TopUpRequest):
     if request.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive.")
-    
-    # NOWPayments minimum is usually $1 (or crypto equivalent)
     if request.amount < 1.0:
         raise HTTPException(status_code=400, detail="Minimum top up is $1.00")
 
     try:
-        # We use a unique order ID to track this payment
         order_id = f"user_{request.user_id}_{int(random.random() * 1000000)}"
         
-        # Create the invoice
-        invoice = np_client.create_invoice(
-            price_amount=request.amount,
-            price_currency="usd",
-            order_id=order_id,
-            order_description=f"FBG SMS Wallet Top-Up for User {request.user_id}",
-            ipn_callback_url="https://grizzly-sms-backend.onrender.com/api/payment/webhook",
-            success_url="https://fbgsms.netlify.app/",
-            cancel_url="https://fbgsms.netlify.app/"
-        )
+        headers = {
+            "x-api-key": NP_API_KEY,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "price_amount": request.amount,
+            "price_currency": "usd",
+            "order_id": order_id,
+            "order_description": f"FBG SMS Wallet Top-Up for User {request.user_id}",
+            "ipn_callback_url": "https://grizzly-sms-backend.onrender.com/api/payment/webhook",
+            "success_url": "https://fbgsms.netlify.app/",
+            "cancel_url": "https://fbgsms.netlify.app/"
+        }
         
-        # Save pending payment to DB
+        response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers)
+        response.raise_for_status()
+        invoice_data = response.json()
+        
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (?, ?, ?, ?)",
-            (str(invoice['id']), request.user_id, request.amount, 'waiting')
+            (str(invoice_data['id']), request.user_id, request.amount, 'waiting')
         )
         conn.commit()
         conn.close()
 
-        return {"invoice_url": invoice['invoice_url']}
+        return {"invoice_url": invoice_data['invoice_url']}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
 
 @app.post("/api/payment/webhook")
 async def payment_webhook(request: Request):
-    """Listens for NOWPayments confirmations and credits the wallet."""
     payload = await request.json()
     signature = request.headers.get("x-nowpayments-sig")
     
-    # Verify the signature to prevent fake webhooks
-    if not np_client.verify_ipn_signature(payload, signature):
+    message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+    expected_sig = hmac.new(NP_IPN_SECRET.encode(), message.encode(), hashlib.sha512).hexdigest()
+    
+    if not signature or not hmac.compare_digest(expected_sig, signature):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     payment_status = payload.get("payment_status")
@@ -250,9 +254,7 @@ async def payment_webhook(request: Request):
     payment_id = str(payload.get("payment_id"))
     price_amount = payload.get("price_amount")
 
-    # If payment is finished, credit the user
     if payment_status in ["finished", "confirmed"]:
-        # order_id format: user_123_45678
         try:
             user_id = int(order_id.split("_")[1])
         except (IndexError, ValueError):
@@ -260,18 +262,13 @@ async def payment_webhook(request: Request):
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        
-        # Check if we already processed this payment
         cursor.execute("SELECT status FROM payments WHERE payment_id = ?", (payment_id,))
         row = cursor.fetchone()
         
         if row and row[0] != 'finished':
-            # Update payment status
             cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = ?", (payment_id,))
-            # Add balance to user
             cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (price_amount, user_id))
             conn.commit()
-            
         conn.close()
 
     return {"status": "success"}
