@@ -273,6 +273,18 @@ async def payment_webhook(request: Request):
 
     return {"status": "success"}
 
+# ==================== TEMPORARY ADMIN ENDPOINT ====================
+@app.post("/api/admin/add-funds")
+def admin_add_funds(user_id: int, amount: float):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, user_id))
+    conn.commit()
+    cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
+    new_bal = cursor.fetchone()[0]
+    conn.close()
+    return {"message": f"Added ${amount}", "new_balance": new_bal}
+
 # ==================== REFERENCE DATA & NUMBER ENDPOINTS ====================
 @app.get("/api/countries")
 def get_countries():
@@ -395,13 +407,3 @@ def get_history(user_id: int):
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"id": r[0], "phone_number": r[1], "service": r[2], "country": r[3], "status": r[4], "sms_code": r[5], "cost": r[6], "created_at": r[7]} for r in rows]}
- @app.post("/api/admin/add-funds")
-def admin_add_funds(user_id: int, amount: float):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (amount, user_id))
-    conn.commit()
-    cursor.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
-    new_bal = cursor.fetchone()[0]
-    conn.close()
-    return {"message": f"Added ${amount}", "new_balance": new_bal}
