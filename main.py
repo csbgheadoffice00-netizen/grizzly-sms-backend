@@ -160,7 +160,7 @@ def request_code(request: EmailRequest):
 
     try:
         resend.Emails.send({
-            "from": "onboarding@resend.dev",
+            "from": ""from": "noreply@fbgsmsactivate.com",",
             "to": email,
             "subject": "Your FBG SMS Verification Code",
             "html": f"<p>Your verification code is: <strong>{code}</strong></p><p>If you didn't request this, ignore this email.</p>"
@@ -209,7 +209,7 @@ def forgot_password(request: EmailRequest):
 
     try:
         resend.Emails.send({
-            "from": "onboarding@resend.dev",
+            "from": ""from": "noreply@fbgsmsactivate.com",",
             "to": email,
             "subject": "FBG SMS Password Reset",
             "html": f"<p>Your password reset code is: <strong>{code}</strong></p>"
