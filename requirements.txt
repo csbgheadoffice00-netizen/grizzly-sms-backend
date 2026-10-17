@@ -3,3 +3,4 @@ uvicorn
 requests
 pydantic
 psycopg2-binary
+resend
