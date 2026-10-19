@@ -65,11 +65,11 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Add has_topped_up column if it doesn't exist (for existing databases)
+      # Add has_topped_up column if it doesn't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0;")
     except psycopg2.errors.DuplicateColumn:
-        pass # Column already exists
+        conn.rollback() # <--- THIS IS THE MAGIC FIX
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
