@@ -10,6 +10,7 @@ import string
 import hmac
 import json
 import resend
+import time
 
 app = FastAPI()
 
@@ -417,7 +418,7 @@ def admin_add_funds(user_id: int, amount: float):
 def get_countries():
     params = {"api_key": API_KEY, "action": "getCountries"}
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10)
+        response = requests.get(BASE_URL, params=params, timeout=15)
         return response.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -437,7 +438,7 @@ def get_prices(service: str = None, country: int = None):
     if service: params["service"] = service
     if country: params["country"] = country
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10)
+        response = requests.get(BASE_URL, params=params, timeout=15)
         return response.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -452,25 +453,34 @@ def buy_number(request: BuyRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Increase timeout for price check to 15 seconds
     price_params = {"api_key": API_KEY, "action": "getPrices", "service": request.service, "country": request.country}
-    price_response = requests.get(BASE_URL, params=price_params)
-    price_data = price_response.json()
     try:
+        price_response = requests.get(BASE_URL, params=price_params, timeout=15)
+        price_data = price_response.json()
         cost = price_data[str(request.country)][request.service]["cost"]
         final_price = round(cost + PROFIT_MARGIN, 2)
     except (KeyError, TypeError):
         conn.close()
-        raise HTTPException(status_code=400, detail="Unavailable")
-
+        raise HTTPException(status_code=400, detail="This service is currently unavailable. Please try another country or service.")
+    except requests.exceptions.Timeout:
+        conn.close()
+        raise HTTPException(status_code=504, detail="HeroSMS server timed out. Please try again.")
+    
     if user[0] < final_price:
         conn.close()
         raise HTTPException(status_code=400, detail="INSUFFICIENT_BALANCE")
 
+    # Increase timeout for buying the number to 15 seconds
     params = {"api_key": API_KEY, "action": "getNumber", "service": request.service, "country": request.country}
-    response = requests.get(BASE_URL, params=params)
-    if "ACCESS_NUMBER" not in response.text:
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=15)
+        if "ACCESS_NUMBER" not in response.text:
+            conn.close()
+            raise HTTPException(status_code=400, detail="HeroSMS is out of stock for this selection. Try another country.")
+    except requests.exceptions.Timeout:
         conn.close()
-        raise HTTPException(status_code=400, detail=response.text)
+        raise HTTPException(status_code=504, detail="HeroSMS server timed out. Please try again.")
 
     parts = response.text.split(":")
     activation_id, phone_number = parts[1], parts[2]
@@ -484,7 +494,7 @@ def buy_number(request: BuyRequest):
 @app.get("/api/check-sms/{activation_id}")
 def check_sms(activation_id: str):
     params = {"api_key": API_KEY, "action": "getStatus", "id": activation_id}
-    response = requests.get(BASE_URL, params=params)
+    response = requests.get(BASE_URL, params=params, timeout=15)
     text = response.text
     if "STATUS_OK" in text:
         code = text.split(":")[1]
@@ -512,12 +522,11 @@ def cancel_activation(activation_id: str):
         cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
         conn.commit()
     conn.close()
-    requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id})
+    requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id}, timeout=15)
     return {"message": "Activation cancelled"}
 
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int):
-    """Returns ALL active PENDING transactions for a user."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
