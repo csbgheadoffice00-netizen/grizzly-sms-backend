@@ -342,8 +342,8 @@ async def create_invoice(request: TopUpRequest):
             "order_id": order_id,
             "order_description": f"FBG SMS Wallet Top-Up for User {request.user_id}",
             "ipn_callback_url": "https://grizzly-sms-backend.onrender.com/api/payment/webhook",
-            "success_url": "https://fbgsms.netlify.app/",
-            "cancel_url": "https://fbgsms.netlify.app/"
+            "success_url": "https://fbgsmsactivate.com/",
+            "cancel_url": "https://fbgsmsactivate.com/"
         }
         
         response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers)
@@ -517,14 +517,33 @@ def cancel_activation(activation_id: str):
 
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int):
+    """Returns ALL active PENDING transactions for a user."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT activation_id, phone_number, service, country, created_at FROM transactions WHERE user_id = %s AND status = 'PENDING' ORDER BY created_at DESC LIMIT 1", (user_id,))
-    row = cursor.fetchone()
+    cursor.execute(
+        """SELECT activation_id, phone_number, service, country, created_at 
+           FROM transactions 
+           WHERE user_id = %s AND status = 'PENDING' 
+           ORDER BY created_at DESC""",
+        (user_id,)
+    )
+    rows = cursor.fetchall()
     conn.close()
-    if not row:
-        return {"has_active": False}
-    return {"has_active": True, "activation_id": row[0], "phone_number": row[1], "service": row[2], "country": row[3], "created_at": row[4]}
+
+    if not rows:
+        return {"has_active": False, "activations": []}
+
+    activations = []
+    for row in rows:
+        activations.append({
+            "activation_id": row[0],
+            "phone_number": row[1],
+            "service": row[2],
+            "country": row[3],
+            "created_at": row[4],
+        })
+
+    return {"has_active": True, "activations": activations}
 
 @app.get("/api/history/{user_id}")
 def get_history(user_id: int):
