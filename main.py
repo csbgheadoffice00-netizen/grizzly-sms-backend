@@ -30,6 +30,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 PROFIT_MARGIN = 0.20
 REFERRAL_BONUS = 0.50
 STARTING_BALANCE = 0.00
+MAX_REFERRALS = 8
+FREE_REFERRAL_LIMIT = 3
 
 # NOWPayments Config
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
@@ -57,11 +59,18 @@ def init_db():
             referred_by INTEGER,
             referral_count INTEGER DEFAULT 0,
             referral_earnings REAL DEFAULT 0.0,
+            has_topped_up INTEGER DEFAULT 0,
             is_verified INTEGER DEFAULT 0,
             verification_code TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Add has_topped_up column if it doesn't exist (for existing databases)
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0;")
+    except psycopg2.errors.DuplicateColumn:
+        pass # Column already exists
+    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
@@ -264,12 +273,23 @@ def register(request: RegisterRequest):
     referrer_id = None
     entered_code = (request.referral_code or "").strip().upper()
     if entered_code:
-        cursor.execute("SELECT id FROM users WHERE referral_code = %s", (entered_code,))
+        cursor.execute("SELECT id, referral_count, has_topped_up FROM users WHERE referral_code = %s", (entered_code,))
         row = cursor.fetchone()
         if not row:
             conn.close()
             raise HTTPException(status_code=400, detail="Invalid referral code.")
+        
         referrer_id = row[0]
+        referrer_count = row[1]
+        referrer_topped_up = row[2]
+
+        # Check rules
+        if referrer_count >= MAX_REFERRALS:
+            conn.close()
+            raise HTTPException(status_code=400, detail="This referral code has reached its maximum limit of 8 referrals.")
+        if referrer_count >= FREE_REFERRAL_LIMIT and not referrer_topped_up:
+            conn.close()
+            raise HTTPException(status_code=400, detail="This user needs to top up their account before they can refer more people.")
 
     new_code = make_unique_code(cursor)
     start_balance = REFERRAL_BONUS if referrer_id else STARTING_BALANCE
@@ -393,7 +413,7 @@ async def payment_webhook(request: Request):
         
         if row and row[0] != 'finished':
             cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = %s", (payment_id,))
-            cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (price_amount, user_id))
+            cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (price_amount, user_id))
             conn.commit()
         conn.close()
 
@@ -404,7 +424,7 @@ async def payment_webhook(request: Request):
 def admin_add_funds(user_id: int, amount: float):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (amount, user_id))
+    cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (amount, user_id))
     conn.commit()
     cursor.execute("SELECT balance FROM users WHERE id = %s", (user_id,))
     new_bal = cursor.fetchone()
@@ -453,7 +473,6 @@ def buy_number(request: BuyRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Increase timeout for price check to 15 seconds
     price_params = {"api_key": API_KEY, "action": "getPrices", "service": request.service, "country": request.country}
     try:
         price_response = requests.get(BASE_URL, params=price_params, timeout=15)
@@ -471,7 +490,6 @@ def buy_number(request: BuyRequest):
         conn.close()
         raise HTTPException(status_code=400, detail="INSUFFICIENT_BALANCE")
 
-    # Increase timeout for buying the number to 15 seconds
     params = {"api_key": API_KEY, "action": "getNumber", "service": request.service, "country": request.country}
     try:
         response = requests.get(BASE_URL, params=params, timeout=15)
