@@ -65,7 +65,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-      # Add has_topped_up column if it doesn't exist (for existing databases)
+    # Add has_topped_up column if it doesn't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0;")
     except psycopg2.errors.DuplicateColumn:
@@ -367,7 +367,8 @@ async def create_invoice(request: TopUpRequest):
             "cancel_url": "https://fbgsmsactivate.com/"
         }
         
-        response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers)
+        # ADDED TIMEOUT HERE
+        response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers, timeout=20)
         response.raise_for_status()
         invoice_data = response.json()
         
@@ -381,6 +382,8 @@ async def create_invoice(request: TopUpRequest):
         conn.close()
 
         return {"invoice_url": invoice_data['invoice_url']}
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Payment provider timed out. Please try again.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
 
