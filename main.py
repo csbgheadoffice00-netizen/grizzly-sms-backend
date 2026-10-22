@@ -37,6 +37,9 @@ FREE_REFERRAL_LIMIT = 3
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
 NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
+# Apirone Config (NEW)
+APIRONE_API_KEY = os.getenv("APIRONE_API_KEY", "PASTE_YOUR_APIRONE_KEY_HERE")
+
 # Resend Email Config
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 resend.api_key = RESEND_API_KEY
@@ -65,11 +68,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Add has_topped_up column if it doesn't exist (for existing databases)
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0;")
     except psycopg2.errors.DuplicateColumn:
-        conn.rollback() # <--- THIS IS THE MAGIC FIX
+        conn.rollback()
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
@@ -283,7 +285,6 @@ def register(request: RegisterRequest):
         referrer_count = row[1]
         referrer_topped_up = row[2]
 
-        # Check rules
         if referrer_count >= MAX_REFERRALS:
             conn.close()
             raise HTTPException(status_code=400, detail="This referral code has reached its maximum limit of 8 referrals.")
@@ -367,7 +368,6 @@ async def create_invoice(request: TopUpRequest):
             "cancel_url": "https://fbgsmsactivate.com/"
         }
         
-        # ADDED TIMEOUT HERE
         response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers, timeout=20)
         response.raise_for_status()
         invoice_data = response.json()
@@ -386,6 +386,48 @@ async def create_invoice(request: TopUpRequest):
         raise HTTPException(status_code=504, detail="Payment provider timed out. Please try again.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
+
+@app.post("/api/payment/create-btc-invoice")
+async def create_btc_invoice(request: TopUpRequest):
+    if request.amount < 1.0:
+        raise HTTPException(status_code=400, detail="Minimum is $1.00")
+
+    try:
+        # Apirone requires the amount in Satoshis. 
+        # For a real app, you should fetch the live BTC price from an API like CoinGecko.
+        # Here we use an approximate price for the math.
+        btc_price = 65000.00 
+        amount_in_btc = request.amount / btc_price
+        amount_in_sats = int(amount_in_btc * 100000000)
+
+        url = "https://apirone.com/api/v2/accounts/btc/addresses"
+        headers = {
+            "Authorization": f"Bearer {APIRONE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "callback_url": "https://grizzly-sms-backend.onrender.com/api/payment/webhook",
+            "amount": amount_in_sats,
+            "description": f"FBG SMS Top-Up for User {request.user_id}"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        invoice_data = response.json()
+
+        payment_id = invoice_data['address']
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)",
+            (payment_id, request.user_id, request.amount, 'waiting')
+        )
+        conn.commit()
+        conn.close()
+
+        return {"invoice_url": f"bitcoin:{payment_id}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Apirone error: {str(e)}")
 
 @app.post("/api/payment/webhook")
 async def payment_webhook(request: Request):
