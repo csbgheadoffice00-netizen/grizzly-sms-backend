@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -39,6 +40,15 @@ NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
 # Apirone Config (NEW)
 APIRONE_API_KEY = os.getenv("APIRONE_API_KEY", "PASTE_YOUR_APIRONE_KEY_HERE")
+# Apirone ACCOUNT id (apr-... or btc-...). NOT the currency "btc".
+APIRONE_ACCOUNT = os.getenv("APIRONE_ACCOUNT", "").strip()
+APIRONE_WEBHOOK_URL = os.getenv(
+    "APIRONE_WEBHOOK_URL",
+    "https://grizzly-sms-backend.onrender.com/api/payment/apirone-webhook",
+)
+# Credit the wallet only after the invoice reaches "completed" (block confirmed).
+# Set to 0 to also credit on the earlier "paid"/"overpaid" status.
+APIRONE_REQUIRE_CONFIRMATION = os.getenv("APIRONE_REQUIRE_CONFIRMATION", "1") == "1"
 
 # Resend Email Config
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -387,47 +397,199 @@ async def create_invoice(request: TopUpRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
 
+# ---------- Apirone (Bitcoin) helpers ----------
+_btc_price_cache = {"price": 0.0, "ts": 0.0}
+
+
+def get_btc_price_usd() -> float:
+    """Live BTC price in USD, cached for 5 minutes. Raises if unavailable."""
+    now = time.time()
+    if _btc_price_cache["price"] > 0 and (now - _btc_price_cache["ts"]) < 300:
+        return _btc_price_cache["price"]
+
+    price = 0.0
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            price = float(r.json()["bitcoin"]["usd"])
+    except Exception:
+        price = 0.0
+
+    if price <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not fetch the BTC/USD rate. Try again shortly.",
+        )
+
+    _btc_price_cache.update({"price": price, "ts": now})
+    return price
+
+
+def apirone_account_ready() -> bool:
+    return bool(APIRONE_ACCOUNT) and APIRONE_ACCOUNT.startswith(("apr-", "btc-"))
+
+
 @app.post("/api/payment/create-btc-invoice")
 async def create_btc_invoice(request: TopUpRequest):
+    if request.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive.")
     if request.amount < 1.0:
         raise HTTPException(status_code=400, detail="Minimum is $1.00")
+    if not apirone_account_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Bitcoin is not configured yet (APIRONE_ACCOUNT missing on the server).",
+        )
+
+    btc_price = get_btc_price_usd()
+    amount_in_btc = request.amount / btc_price
+    amount_in_sats = int(round(amount_in_btc * 100000000))
+    if amount_in_sats < 1000:
+        amount_in_sats = 1000  # keep invoices above dust limit
+
+    # Correct endpoint: /accounts/{ACCOUNT_ID}/invoices  (currency goes in the body).
+    url = f"https://apirone.com/api/v2/accounts/{APIRONE_ACCOUNT}/invoices"
+    payload = {
+        "amount": amount_in_sats,
+        "currency": "btc",
+        "lifetime": 3600,
+        "callback_url": APIRONE_WEBHOOK_URL,
+        "user-data": {
+            "title": f"FBG SMS top-up ${request.amount:.2f}",
+            "merchant": "FBG SMS",
+            "user_id": str(request.user_id),
+        },
+    }
 
     try:
-        # Apirone requires the amount in Satoshis. 
-        # For a real app, you should fetch the live BTC price from an API like CoinGecko.
-        # Here we use an approximate price for the math.
-        btc_price = 65000.00 
-        amount_in_btc = request.amount / btc_price
-        amount_in_sats = int(amount_in_btc * 100000000)
+        response = requests.post(url, json=payload, timeout=30)
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Apirone timed out. Please try again.")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Apirone unreachable: {e}")
 
-        url = "https://apirone.com/api/v2/accounts/btc/addresses"
-        headers = {
-            "Authorization": f"Bearer {APIRONE_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "callback_url": "https://grizzly-sms-backend.onrender.com/api/payment/webhook",
-            "amount": amount_in_sats,
-            "description": f"FBG SMS Top-Up for User {request.user_id}"
-        }
-        
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        invoice_data = response.json()
+    if response.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Apirone error {response.status_code}: {response.text[:300]}",
+        )
 
-        payment_id = invoice_data['address']
+    invoice_data = response.json()
+    invoice_id = invoice_data.get("invoice")
+    invoice_url = invoice_data.get("invoice-url") or invoice_data.get("invoice_url")
+    address = invoice_data.get("address")
+
+    if not invoice_id or not invoice_url:
+        raise HTTPException(status_code=502, detail="Apirone returned an incomplete invoice.")
+
+    try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)",
-            (payment_id, request.user_id, request.amount, 'waiting')
+            (invoice_id, request.user_id, request.amount, "waiting"),
         )
         conn.commit()
         conn.close()
-
-        return {"invoice_url": f"bitcoin:{payment_id}"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Apirone error: {str(e)}")
+        # Do not fail the payment just because bookkeeping hiccuped; the
+        # webhook can still find the user via the invoice user-data.
+        print(f"WARN: could not record apirone payment {invoice_id}: {e}")
+
+    return {
+        "provider": "apirone",
+        "invoice_url": invoice_url,
+        "invoice": invoice_id,
+        "address": address,
+        "amount_btc": amount_in_sats / 100000000,
+        "amount_satoshi": amount_in_sats,
+        "btc_price": btc_price,
+    }
+
+
+@app.post("/api/payment/apirone-webhook")
+async def apirone_webhook(request: Request):
+    """Apirone invoice callback: {"account": "...", "invoice": "...", "status": "..."}.
+
+    Apirone does not sign these callbacks, so the status is re-checked against
+    the Apirone API before any balance is credited.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return PlainTextResponse("bad request", status_code=400)
+
+    invoice_id = payload.get("invoice")
+    if not invoice_id:
+        return PlainTextResponse("ok")
+
+    # Trust only what Apirone's own API says.
+    try:
+        r = requests.get(f"https://apirone.com/api/v2/invoices/{invoice_id}", timeout=20)
+        if r.status_code != 200:
+            return PlainTextResponse("ok")
+        info = r.json()
+    except Exception:
+        # Ask Apirone to retry later
+        return PlainTextResponse("retry", status_code=500)
+
+    status = info.get("status")
+    paid_sats = int(info.get("amount", 0) or 0)
+
+    ok_statuses = {"completed"} if APIRONE_REQUIRE_CONFIRMATION else {"paid", "overpaid", "completed"}
+    if status not in ok_statuses:
+        return PlainTextResponse("ok")
+
+    # Find the pending record
+    user_id = None
+    amount_usd = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id, amount, status FROM payments WHERE payment_id = %s",
+            (invoice_id,),
+        )
+        row = cursor.fetchone()
+        if row:
+            user_id, amount_usd, db_status = row
+            if db_status == "finished":
+                conn.close()
+                return PlainTextResponse("ok")
+
+        if user_id is None:
+            user_id = info.get("user-data", {}).get("user_id")
+            try:
+                user_id = int(user_id)
+            except (TypeError, ValueError):
+                user_id = None
+
+        if user_id is None:
+            conn.close()
+            return PlainTextResponse("ok")
+
+        if amount_usd is None:
+            btc_price = get_btc_price_usd()
+            amount_usd = round((paid_sats / 100000000) * btc_price, 2)
+
+        cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = %s", (invoice_id,))
+        cursor.execute(
+            "UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s",
+            (amount_usd, user_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"ERROR crediting apirone invoice {invoice_id}: {e}")
+        return PlainTextResponse("retry", status_code=500)
+
+    print(f"Apirone invoice {invoice_id} {status}: credited ${amount_usd} to user {user_id}")
+    return PlainTextResponse("ok")
+
 
 @app.post("/api/payment/webhook")
 async def payment_webhook(request: Request):
