@@ -10,6 +10,7 @@ import random
 import string
 import hmac
 import json
+from decimal import Decimal, ROUND_HALF_UP
 import resend
 import time
 
@@ -397,35 +398,87 @@ async def create_invoice(request: TopUpRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
 
-# ---------- Apirone (Bitcoin) helpers ----------
-_btc_price_cache = {"price": 0.0, "ts": 0.0}
+# ---------- Apirone (crypto) helpers ----------
+# Only currencies that are enabled on the Apirone account. tbtc (testnet) is
+# deliberately excluded. `decimals` matches the units-factor reported by
+# https://apirone.com/api/v2/accounts (OPTIONS).
+COINS = [
+    {"code": "btc", "cb": "BTC", "name": "Bitcoin", "symbol": "BTC", "price_id": "bitcoin", "decimals": 8},
+    {"code": "eth", "cb": "ETH", "name": "Ethereum", "symbol": "ETH", "price_id": "ethereum", "decimals": 18},
+    {"code": "usdt@trx", "name": "Tether (TRC20)", "symbol": "USDT", "price_id": None, "decimals": 6},
+    {"code": "usdc@trx", "name": "USD Coin (TRC20)", "symbol": "USDC", "price_id": None, "decimals": 6},
+    {"code": "usdt@eth", "name": "Tether (ERC20)", "symbol": "USDT", "price_id": None, "decimals": 6},
+    {"code": "usdc@eth", "name": "USD Coin (ERC20)", "symbol": "USDC", "price_id": None, "decimals": 6},
+    {"code": "usdt@bnb", "name": "Tether (BEP20)", "symbol": "USDT", "price_id": None, "decimals": 18},
+    {"code": "usdc@bnb", "name": "USD Coin (BEP20)", "symbol": "USDC", "price_id": None, "decimals": 18},
+    {"code": "usdt@ton", "name": "Tether (TON)", "symbol": "USDT", "price_id": None, "decimals": 6},
+    {"code": "ltc", "cb": "LTC", "name": "Litecoin", "symbol": "LTC", "price_id": "litecoin", "decimals": 8},
+    {"code": "bch", "cb": "BCH", "name": "Bitcoin Cash", "symbol": "BCH", "price_id": "bitcoin-cash", "decimals": 8},
+    {"code": "doge", "cb": "DOGE", "name": "Dogecoin", "symbol": "DOGE", "price_id": "dogecoin", "decimals": 8},
+    {"code": "trx", "cb": "TRX", "name": "TRON", "symbol": "TRX", "price_id": "tron", "decimals": 6},
+    {"code": "bnb", "cb": "BNB", "name": "BNB", "symbol": "BNB", "price_id": "binancecoin", "decimals": 18},
+]
+COIN_BY_CODE = {c["code"]: c for c in COINS}
+DUST_MIN_UNITS = 1000  # for UTXO chains
+_price_cache = {}  # code -> (price_usd, timestamp)
 
 
-def get_btc_price_usd() -> float:
-    """Live BTC price in USD, cached for 5 minutes. Raises if unavailable."""
-    now = time.time()
-    if _btc_price_cache["price"] > 0 and (now - _btc_price_cache["ts"]) < 300:
-        return _btc_price_cache["price"]
+def _price_from_coinbase(symbol: str) -> float:
+    try:
+        r = requests.get(
+            f"https://api.coinbase.com/v2/prices/{symbol}-USD/spot", timeout=10
+        )
+        if r.status_code == 200:
+            return float(r.json()["data"]["amount"])
+    except Exception:
+        pass
+    return 0.0
 
-    price = 0.0
+
+def _price_from_coingecko(price_id: str) -> float:
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bitcoin", "vs_currencies": "usd"},
-            timeout=15,
+            params={"ids": price_id, "vs_currencies": "usd"},
+            timeout=12,
         )
         if r.status_code == 200:
-            price = float(r.json()["bitcoin"]["usd"])
+            payload = r.json()
+            if price_id in payload:
+                return float(payload[price_id]["usd"])
     except Exception:
-        price = 0.0
+        pass
+    return 0.0
+
+
+def get_asset_price_usd(code: str) -> float:
+    """USD price for a coin, cached 5 minutes.
+
+    Two independent sources so a rate-limited free API never blocks payments.
+    Stablecoins are pinned to 1.00.
+    """
+    coin = COIN_BY_CODE.get(code)
+    if coin is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported currency: {code}")
+    if coin["price_id"] is None:
+        return 1.0
+
+    now = time.time()
+    cached = _price_cache.get(code)
+    if cached and (now - cached[1]) < 300:
+        return cached[0]
+
+    price = _price_from_coinbase(coin.get("cb", ""))
+    if price <= 0:
+        price = _price_from_coingecko(coin["price_id"])
 
     if price <= 0:
         raise HTTPException(
             status_code=503,
-            detail="Could not fetch the BTC/USD rate. Try again shortly.",
+            detail=f"Could not fetch the {code.upper()}/USD rate. Try again shortly.",
         )
 
-    _btc_price_cache.update({"price": price, "ts": now})
+    _price_cache[code] = (price, now)
     return price
 
 
@@ -433,29 +486,67 @@ def apirone_account_ready() -> bool:
     return bool(APIRONE_ACCOUNT) and APIRONE_ACCOUNT.startswith(("apr-", "btc-"))
 
 
+def to_base_units(amount_usd: float, price_usd: float, decimals: int) -> int:
+    """Convert a USD amount into the coin's smallest unit (satoshi/wei/sun...)."""
+    units = (
+        Decimal(str(amount_usd))
+        / Decimal(str(price_usd))
+        * (Decimal(10) ** decimals)
+    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(units)
+
+
+@app.get("/api/payment/coins")
+def list_coins():
+    return {
+        "coins": [
+            {
+                "code": c["code"],
+                "name": c["name"],
+                "symbol": c["symbol"],
+                "min_usd": 1.0,
+            }
+            for c in COINS
+        ]
+    }
+
+
+class CryptoTopUpRequest(BaseModel):
+    user_id: int
+    amount: float
+    currency: str = "btc"
+
+
 @app.post("/api/payment/create-btc-invoice")
-async def create_btc_invoice(request: TopUpRequest):
+async def create_btc_invoice(request: CryptoTopUpRequest):
+    """Create a crypto invoice for any enabled coin (default Bitcoin)."""
+    currency = (request.currency or "btc").strip().lower()
+
     if request.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive.")
     if request.amount < 1.0:
         raise HTTPException(status_code=400, detail="Minimum is $1.00")
+    if currency not in COIN_BY_CODE:
+        raise HTTPException(status_code=400, detail=f"Unsupported currency: {currency}")
     if not apirone_account_ready():
         raise HTTPException(
             status_code=503,
-            detail="Bitcoin is not configured yet (APIRONE_ACCOUNT missing on the server).",
+            detail="Crypto payments are not configured yet (APIRONE_ACCOUNT missing on the server).",
         )
 
-    btc_price = get_btc_price_usd()
-    amount_in_btc = request.amount / btc_price
-    amount_in_sats = int(round(amount_in_btc * 100000000))
-    if amount_in_sats < 1000:
-        amount_in_sats = 1000  # keep invoices above dust limit
+    coin = COIN_BY_CODE[currency]
+    price_usd = get_asset_price_usd(currency)
+    units = to_base_units(request.amount, price_usd, coin["decimals"])
 
-    # Correct endpoint: /accounts/{ACCOUNT_ID}/invoices  (currency goes in the body).
+    if coin["code"] in ("btc", "ltc", "bch", "doge") and units < DUST_MIN_UNITS:
+        units = DUST_MIN_UNITS
+    if units <= 0:
+        raise HTTPException(status_code=400, detail="Amount too small.")
+
     url = f"https://apirone.com/api/v2/accounts/{APIRONE_ACCOUNT}/invoices"
     payload = {
-        "amount": amount_in_sats,
-        "currency": "btc",
+        "amount": units,
+        "currency": currency,
         "lifetime": 3600,
         "callback_url": APIRONE_WEBHOOK_URL,
         "user-data": {
@@ -468,7 +559,7 @@ async def create_btc_invoice(request: TopUpRequest):
     try:
         response = requests.post(url, json=payload, timeout=30)
     except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="Apirone timed out. Please try again.")
+        raise HTTPException(status_code=504, detail="Payment provider timed out. Please try again.")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Apirone unreachable: {e}")
 
@@ -496,18 +587,17 @@ async def create_btc_invoice(request: TopUpRequest):
         conn.commit()
         conn.close()
     except Exception as e:
-        # Do not fail the payment just because bookkeeping hiccuped; the
-        # webhook can still find the user via the invoice user-data.
         print(f"WARN: could not record apirone payment {invoice_id}: {e}")
 
     return {
         "provider": "apirone",
+        "currency": currency,
         "invoice_url": invoice_url,
         "invoice": invoice_id,
         "address": address,
-        "amount_btc": amount_in_sats / 100000000,
-        "amount_satoshi": amount_in_sats,
-        "btc_price": btc_price,
+        "amount_crypto": units / (10 ** coin["decimals"]),
+        "amount_units": units,
+        "asset_price_usd": price_usd,
     }
 
 
@@ -527,24 +617,20 @@ async def apirone_webhook(request: Request):
     if not invoice_id:
         return PlainTextResponse("ok")
 
-    # Trust only what Apirone's own API says.
     try:
         r = requests.get(f"https://apirone.com/api/v2/invoices/{invoice_id}", timeout=20)
         if r.status_code != 200:
             return PlainTextResponse("ok")
         info = r.json()
     except Exception:
-        # Ask Apirone to retry later
         return PlainTextResponse("retry", status_code=500)
 
     status = info.get("status")
-    paid_sats = int(info.get("amount", 0) or 0)
 
     ok_statuses = {"completed"} if APIRONE_REQUIRE_CONFIRMATION else {"paid", "overpaid", "completed"}
     if status not in ok_statuses:
         return PlainTextResponse("ok")
 
-    # Find the pending record
     user_id = None
     amount_usd = None
     try:
@@ -562,9 +648,9 @@ async def apirone_webhook(request: Request):
                 return PlainTextResponse("ok")
 
         if user_id is None:
-            user_id = info.get("user-data", {}).get("user_id")
+            raw = info.get("user-data", {}).get("user_id")
             try:
-                user_id = int(user_id)
+                user_id = int(raw)
             except (TypeError, ValueError):
                 user_id = None
 
@@ -573,8 +659,17 @@ async def apirone_webhook(request: Request):
             return PlainTextResponse("ok")
 
         if amount_usd is None:
-            btc_price = get_btc_price_usd()
-            amount_usd = round((paid_sats / 100000000) * btc_price, 2)
+            currency = (info.get("currency") or "btc").lower()
+            coin = COIN_BY_CODE.get(currency)
+            if coin is None:
+                conn.close()
+                return PlainTextResponse("ok")
+            price_usd = get_asset_price_usd(currency)
+            paid_units = Decimal(str(info.get("amount", 0) or 0))
+            amount_usd = float(
+                (paid_units / (Decimal(10) ** coin["decimals"])) * Decimal(str(price_usd))
+            )
+            amount_usd = round(amount_usd, 2)
 
         cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = %s", (invoice_id,))
         cursor.execute(
