@@ -16,12 +16,66 @@ import time
 
 app = FastAPI()
 
-# --- SECURITY PATCH ---
-from admin_gate import AdminGate
+# ==================== SECURITY GATES (self-contained) ====================
+# Inlined on purpose: no `from admin_gate import ...`, no extra files.
+# Only the Python standard library and Starlette (installed with FastAPI).
+import hmac as _hmac
+import logging as _logging
+from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
+from starlette.responses import JSONResponse as _JSON
+
+_log = _logging.getLogger("security_gate")
+
+# ---- 1. Admin gate: protects every /api/admin/* route -------------------
+# Fails CLOSED. If ADMIN_API_KEY is not configured on the server, all admin
+# requests are denied instead of being left open.
+_ADMIN_PREFIX = "/api/admin"
+
+
+class AdminGate(_BaseMW):
+    async def dispatch(self, request, call_next):
+        path = request.url.path.rstrip("/")
+        if not (path == _ADMIN_PREFIX or path.startswith(_ADMIN_PREFIX + "/")):
+            return await call_next(request)
+
+        admin_key = os.getenv("ADMIN_API_KEY", "").strip()
+        if not admin_key:
+            _log.warning("admin gate: ADMIN_API_KEY unset, denying %s", path)
+            return _JSON(
+                status_code=403,
+                content={"detail": "Admin access is disabled: no admin key configured."},
+            )
+
+        given = request.headers.get("x-admin-key", "")
+        if given and _hmac.compare_digest(given, admin_key):
+            return await call_next(request)
+        return _JSON(status_code=403, content={"detail": "Invalid or missing admin key."})
+
+
+# ---- 2. Docs gate: hides /docs, /redoc, /openapi.json -------------------
+# Set DOCS_ENABLED=1 in the environment to turn them back on.
+_DOCS_HIDDEN = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
+
+class DocsGate(_BaseMW):
+    async def dispatch(self, request, call_next):
+        path = request.url.path.rstrip("/") or "/"
+        if path not in _DOCS_HIDDEN:
+            return await call_next(request)
+        if os.getenv("DOCS_ENABLED", "0") == "1":
+            return await call_next(request)
+        admin_key = os.getenv("ADMIN_API_KEY", "").strip()
+        if admin_key:
+            given = request.headers.get("x-admin-key", "")
+            if given and _hmac.compare_digest(given, admin_key):
+                return await call_next(request)
+        # 404 rather than 403: do not confirm that these paths exist.
+        return _JSON(status_code=404, content={"detail": "Not Found"})
+
+
 app.add_middleware(AdminGate)
-from fb_gate import FbRouteGate
-app.add_middleware(FbRouteGate, mode="observe")
-# ----------------------
+app.add_middleware(DocsGate)
+# ========================================================================
 
 # --- CORS ---
 app.add_middleware(
@@ -781,6 +835,13 @@ def buy_number(request: BuyRequest):
     if not user:
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
+
+    # --- Facebook route gate (OBSERVE ONLY): log, never block ---
+    if str(getattr(request, "service", "")).lower() == "fb" and getattr(request, "country", None) == 187:
+        _log.warning(
+            "fb_gate OBSERVE: facebook order requested country=187 user=%s",
+            getattr(request, "user_id", "?"),
+        )
 
     price_params = {"api_key": API_KEY, "action": "getPrices", "service": request.service, "country": request.country}
     try:
