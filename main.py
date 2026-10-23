@@ -17,8 +17,10 @@ import time
 app = FastAPI()
 
 # --- SECURITY PATCH ---
-from docs_gate import hide_docs
-hide_docs(app)
+from admin_gate import AdminGate
+app.add_middleware(AdminGate)
+from fb_gate import FbRouteGate
+app.add_middleware(FbRouteGate, mode="observe")
 # ----------------------
 
 # --- CORS ---
