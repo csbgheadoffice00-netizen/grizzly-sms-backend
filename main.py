@@ -18,7 +18,7 @@ from docs_gate import hide_docs
 from admin_gate import verify_admin_key
 from fb_gate import check_facebook
 
-app = FastAPI()
+app = FastAPI()hide_docs(app)
 
 # --- CORS ---
 app.add_middleware(
