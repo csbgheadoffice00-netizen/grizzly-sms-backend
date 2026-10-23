@@ -13,6 +13,10 @@ import json
 from decimal import Decimal, ROUND_HALF_UP
 import resend
 import time
+from auth import verify_token
+from docs_gate import hide_docs
+from admin_gate import verify_admin_key
+from fb_gate import check_facebook
 
 app = FastAPI()
 
