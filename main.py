@@ -13,14 +13,13 @@ import json
 from decimal import Decimal, ROUND_HALF_UP
 import resend
 import time
-from admin_gate import AdminGate
-from docs_gate import DocsGate
-from fb_gate import FbRouteGate
-app.add_middleware(AdminGate)
-app.add_middleware(DocsGate)
-app.add_middleware(FbRouteGate, mode="observe")
 
-app = FastAPI()hide_docs(app)
+app = FastAPI()
+
+# --- SECURITY PATCH ---
+from docs_gate import hide_docs
+hide_docs(app)
+# ----------------------
 
 # --- CORS ---
 app.add_middleware(
