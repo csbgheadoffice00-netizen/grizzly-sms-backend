@@ -200,21 +200,23 @@ def _sweep_stale_activations():
             time.sleep(60)
             conn = get_db_connection()
             cursor = conn.cursor()
-            # Refund the user
+            # Refund the user (excluding 'full' rentals)
             cursor.execute("""
                 UPDATE users u
                 SET balance = balance + t.cost
                 FROM transactions t
                 WHERE t.user_id = u.id
                   AND t.status = 'PENDING'
+                  AND t.service <> 'full'
                   AND t.sms_code IS NULL
                   AND t.created_at < NOW() - INTERVAL '10 minutes'
             """)
-            # Mark transaction as cancelled
+            # Mark transaction as cancelled (excluding 'full' rentals)
             cursor.execute("""
                 UPDATE transactions
                 SET status = 'CANCELLED'
                 WHERE status = 'PENDING'
+                  AND service <> 'full'
                   AND sms_code IS NULL
                   AND created_at < NOW() - INTERVAL '10 minutes'
             """)
@@ -1078,7 +1080,13 @@ def get_services():
     params = {"api_key": API_KEY, "action": "getServicesList", "lang": "en"}
     try:
         response = requests.get(BASE_URL, params=params, timeout=15)
-        return response.json()
+        data = response.json()
+        # Safely remove 'full' (rental) from the dict or list
+        if isinstance(data, dict):
+            data.pop("full", None)
+        elif isinstance(data, list):
+            data = [s for s in data if s.get("code") != "full"]
+        return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1115,6 +1123,11 @@ def buy_number(request: BuyRequest, http_request: Request):
     if not user:
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
+
+    # FIX 2: Reject 'full' (rental) before trying to get prices
+    if str(getattr(request, "service", "")).strip().lower() == "full":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Full rent is not available yet. Please choose another service.")
 
     if str(getattr(request, "service", "")).lower() == "fb" and getattr(request, "country", None) == 187:
         _log.warning("fb_gate OBSERVE: facebook order requested country=187 user=%s", user_id)
