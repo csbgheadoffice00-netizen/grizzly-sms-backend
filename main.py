@@ -90,7 +90,7 @@ MAX_REFERRALS = 8
 FREE_REFERRAL_LIMIT = 3
 
 # --- Auth / token config (v2) ---
-AUTH_MODE = os.getenv("AUTH_MODE", "compat").strip().lower()
+AUTH_MODE = os.getenv("AUTH_MODE", "strict").strip().lower()
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip()
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "168"))
 RESET_CODE_TTL_MINUTES = int(os.getenv("RESET_CODE_TTL_MINUTES", "15"))
@@ -1081,11 +1081,18 @@ def get_services():
     try:
         response = requests.get(BASE_URL, params=params, timeout=15)
         data = response.json()
-        # Safely remove 'full' (rental) from the dict or list
+        
+        # Bulletproof removal of "full" service
         if isinstance(data, dict):
+            # Case 1: {"fb": "Facebook", "full": "Full rent"}
             data.pop("full", None)
+            # Case 2: {"status": "success", "services": [...]}
+            if "services" in data and isinstance(data["services"], list):
+                data["services"] = [s for s in data["services"] if s.get("code") != "full"]
         elif isinstance(data, list):
+            # Case 3: [{"code": "fb", ...}, {"code": "full", ...}]
             data = [s for s in data if s.get("code") != "full"]
+            
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
