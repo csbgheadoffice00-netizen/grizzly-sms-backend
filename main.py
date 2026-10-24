@@ -199,7 +199,7 @@ def init_db():
             status TEXT DEFAULT 'PENDING',
             sms_code TEXT,
             cost REAL DEFAULT 0.50,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            "created_at": row[5]
         )
     """)
     cursor.execute("""
@@ -1337,6 +1337,14 @@ def _activation_owner(http_request: Request, activation_id: str):
     return owner
 
 
+def _iso_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 @app.get("/api/check-sms/{activation_id}")
 def check_sms(activation_id: str, http_request: Request):
     _activation_owner(http_request, activation_id)
@@ -1427,7 +1435,7 @@ def _active_payload(user_id: int):
             "phone_number": row[1],
             "service": row[2],
             "country": row[3],
-            "created_at": row[4],
+            "created_at": _iso_utc(row[4]),
         })
 
     return {"has_active": True, "activations": activations}
@@ -1439,7 +1447,7 @@ def _history_payload(user_id: int):
     cursor.execute("SELECT id, phone_number, service, country, status, sms_code, cost, created_at FROM transactions WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
     rows = cursor.fetchall()
     conn.close()
-    return {"history": [{"id": r[0], "phone_number": r[1], "service": r[2], "country": r[3], "status": r[4], "sms_code": r[5], "cost": r[6], "created_at": r[7]} for r in rows]}
+    return {"history": [{"id": r[0], "phone_number": r[1], "service": r[2], "country": r[3], "status": r[4], "sms_code": r[5], "cost": r[6], "created_at": _iso_utc(r[7])} for r in rows]}
 
 
 @app.get("/api/active/{user_id}")
