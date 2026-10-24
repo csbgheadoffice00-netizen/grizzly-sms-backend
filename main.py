@@ -199,7 +199,7 @@ def init_db():
             status TEXT DEFAULT 'PENDING',
             sms_code TEXT,
             cost REAL DEFAULT 0.50,
-            created_at TIMESTAMP DEFAULT NOW()
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cursor.execute("""
@@ -1366,7 +1366,6 @@ def check_sms(activation_id: str, http_request: Request):
             conn.close()
     return {"status": text}
 
-@app.post("/api/cancel/{activation_id}")
 @app.post("/api/cancel/{activation_id}")
 def cancel_activation(activation_id: str, http_request: Request):
     _activation_owner(http_request, activation_id)
