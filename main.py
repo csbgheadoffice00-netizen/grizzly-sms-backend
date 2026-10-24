@@ -199,7 +199,7 @@ def init_db():
             status TEXT DEFAULT 'PENDING',
             sms_code TEXT,
             cost REAL DEFAULT 0.50,
-            "created_at": row[5]
+            created_at TIMESTAMP DEFAULT NOW()
         )
     """)
     cursor.execute("""
