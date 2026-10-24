@@ -193,7 +193,7 @@ def init_db():
 
 init_db()
 
-# ==================== BACKGROUND SWEEPER ====================
+# ==================== BACKGROUND SWEEPER (8 MINUTES) ====================
 def _sweep_stale_activations():
     while True:
         try:
@@ -209,7 +209,7 @@ def _sweep_stale_activations():
                   AND t.status = 'PENDING'
                   AND t.service <> 'full'
                   AND t.sms_code IS NULL
-                  AND t.created_at < NOW() - INTERVAL '10 minutes'
+                  AND t.created_at < NOW() - INTERVAL '8 minutes'
             """)
             # Mark transaction as cancelled (excluding 'full' rentals)
             cursor.execute("""
@@ -218,7 +218,7 @@ def _sweep_stale_activations():
                 WHERE status = 'PENDING'
                   AND service <> 'full'
                   AND sms_code IS NULL
-                  AND created_at < NOW() - INTERVAL '10 minutes'
+                  AND created_at < NOW() - INTERVAL '8 minutes'
             """)
             conn.commit()
             conn.close()
@@ -1124,7 +1124,7 @@ def buy_number(request: BuyRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
-    # FIX 2: Reject 'full' (rental) before trying to get prices
+    # Reject 'full' (rental) before trying to get prices
     if str(getattr(request, "service", "")).strip().lower() == "full":
         conn.close()
         raise HTTPException(status_code=400, detail="Full rent is not available yet. Please choose another service.")
