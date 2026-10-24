@@ -1089,8 +1089,14 @@ def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
         conn.close()
         return {"ok": False, "reason": "amount_mismatch"}
 
-    cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (credit_usd, user_id))
+    # Atomic claim: only one concurrent request can flip the status.
     cursor.execute("UPDATE paystack_payments SET status = 'finished' WHERE reference = %s AND status = 'pending'", (reference,))
+    if cursor.rowcount != 1:
+        conn.rollback()
+        conn.close()
+        return {"ok": True, "already": True}
+        
+    cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (credit_usd, user_id))
     conn.commit()
     conn.close()
     return {"ok": True, "credited": credit_usd}
