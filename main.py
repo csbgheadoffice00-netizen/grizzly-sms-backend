@@ -1130,11 +1130,11 @@ def paystack_initialize(body: TopupRequest, http_request: Request):
     conn.commit()
     conn.close()
 
-    r = requests.post(
+     r = requests.post(
         "https://api.paystack.co/transaction/initialize",
         headers={"Authorization": f"Bearer {PAYSTACK_SECRET}", "Content-Type": "application/json"},
         json={"email": email, "amount": body.amount_ngn * 100, "reference": reference,
-              "currency": "NGN", "callback_url": "https://fbgsms.com/payment-done"},
+              "currency": "NGN", "callback_url": "https://grizzly-sms-backend.onrender.com"},
         timeout=25,
     )
     data = r.json()
