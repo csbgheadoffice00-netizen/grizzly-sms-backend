@@ -111,7 +111,11 @@ if AUTH_MODE not in ("compat", "strict"):
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
 NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
-# Apirone Config (NEW)
+# Paystack Config (NEW)
+PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
+NGN_PER_USD = float(os.getenv("NGN_PER_USD", "1500"))
+
+# Apirone Config
 APIRONE_API_KEY = os.getenv("APIRONE_API_KEY", "PASTE_YOUR_APIRONE_KEY_HERE")
 APIRONE_ACCOUNT = os.getenv("APIRONE_ACCOUNT", "").strip()
 APIRONE_WEBHOOK_URL = os.getenv(
@@ -188,6 +192,19 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # NEW: Paystack Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS paystack_payments (
+            reference TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            amount_ngn INTEGER NOT NULL,
+            credit_usd REAL NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -200,7 +217,6 @@ def _sweep_stale_activations():
             time.sleep(60)
             conn = get_db_connection()
             cursor = conn.cursor()
-            # Refund the user (excluding 'full' rentals)
             cursor.execute("""
                 UPDATE users u
                 SET balance = balance + t.cost
@@ -211,7 +227,6 @@ def _sweep_stale_activations():
                   AND t.sms_code IS NULL
                   AND t.created_at < NOW() - INTERVAL '8 minutes'
             """)
-            # Mark transaction as cancelled (excluding 'full' rentals)
             cursor.execute("""
                 UPDATE transactions
                 SET status = 'CANCELLED'
@@ -300,6 +315,9 @@ class ResetRequest(BaseModel):
     email: str
     code: str
     new_password: str
+
+class TopupRequest(BaseModel):
+    amount_ngn: int
 
 # ==================== AUTH & RATE-LIMIT HELPERS ====================
 def _utcnow() -> datetime:
@@ -757,7 +775,7 @@ def get_me_referral(http_request: Request):
         raise HTTPException(status_code=404, detail="User not found")
     return payload
 
-# ==================== PAYMENT ENDPOINTS ====================
+# ==================== PAYMENT ENDPOINTS (NOWPayments & Apirone) ====================
 @app.post("/api/payment/create-invoice")
 async def create_invoice(request: TopUpRequest, http_request: Request):
     resolve_self(http_request, request.user_id)
@@ -1051,6 +1069,123 @@ async def payment_webhook(request: Request):
 
     return {"status": "success"}
 
+# ==================== PAYSTACK ENDPOINTS (NEW) ====================
+def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, amount_ngn, credit_usd, status FROM paystack_payments WHERE reference = %s", (reference,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "reason": "unknown_reference"}
+    user_id, amount_ngn, credit_usd, status = row
+    if status == "finished":
+        conn.close()
+        return {"ok": True, "already": True}
+    if currency != "NGN":
+        conn.close()
+        return {"ok": False, "reason": "bad_currency"}
+    if int(amount_kobo) != amount_ngn * 100:
+        conn.close()
+        return {"ok": False, "reason": "amount_mismatch"}
+
+    cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (credit_usd, user_id))
+    cursor.execute("UPDATE paystack_payments SET status = 'finished' WHERE reference = %s AND status = 'pending'", (reference,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "credited": credit_usd}
+
+@app.post("/api/paystack/initialize")
+def paystack_initialize(body: TopupRequest, http_request: Request):
+    if not PAYSTACK_SECRET:
+        raise HTTPException(status_code=503, detail="Payments are not configured yet.")
+    user_id = require_user(http_request)
+    if body.amount_ngn < 500:
+        raise HTTPException(status_code=400, detail="Minimum top-up is 500 NGN.")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    email = row[0]
+
+    reference = f"fbg_{user_id}_{secrets.token_hex(8)}"
+    credit_usd = round(body.amount_ngn / NGN_PER_USD, 2)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO paystack_payments (reference, user_id, amount_ngn, credit_usd) VALUES (%s, %s, %s, %s)",
+        (reference, user_id, body.amount_ngn, credit_usd),
+    )
+    conn.commit()
+    conn.close()
+
+    r = requests.post(
+        "https://api.paystack.co/transaction/initialize",
+        headers={"Authorization": f"Bearer {PAYSTACK_SECRET}", "Content-Type": "application/json"},
+        json={"email": email, "amount": body.amount_ngn * 100, "reference": reference,
+              "currency": "NGN", "callback_url": "https://fbgsms.com/payment-done"},
+        timeout=25,
+    )
+    data = r.json()
+    if not data.get("status"):
+        raise HTTPException(status_code=502, detail="Could not start payment. Please try again.")
+    return {"authorization_url": data["data"]["authorization_url"], "reference": reference, "credit_usd": credit_usd}
+
+@app.post("/api/paystack/webhook")
+async def paystack_webhook(request: Request):
+    raw = await request.body()
+    sig = request.headers.get("x-paystack-signature", "")
+    if not PAYSTACK_SECRET or not sig:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    expected = hmac.new(PAYSTACK_SECRET.encode(), raw, hashlib.sha512).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        event = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bad payload")
+    if event.get("event") != "charge.success":
+        return {"status": "ignored"}
+
+    data = event.get("data", {})
+    reference = data.get("reference", "")
+
+    vr = requests.get(
+        f"https://api.paystack.co/transaction/verify/{reference}",
+        headers={"Authorization": f"Bearer {PAYSTACK_SECRET}"},
+        timeout=25,
+    ).json()
+    if not vr.get("status") or vr.get("data", {}).get("status") != "success":
+        return {"status": "not_verified"}
+
+    vd = vr["data"]
+    result = _credit_topup(reference, vd.get("amount", 0), vd.get("currency", ""))
+    _log.warning("paystack webhook ref=%s result=%s", reference, result)
+    return {"status": "ok"}
+
+@app.get("/api/paystack/verify/{reference}")
+def paystack_verify(reference: str, http_request: Request):
+    user_id = require_user(http_request)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM paystack_payments WHERE reference = %s AND user_id = %s", (reference, user_id))
+    row = cursor.fetchone()
+    conn.close()
+    return {"status": row[0] if row else "unknown"}
+
+@app.get("/api/app/version")
+def app_version():
+    return {"versionCode": 2003,
+            "versionName": "1.3.1",
+            "url": "https://fbgsms.com/app/fbg-sms-latest.apk",
+            "notes": "Bug fixes and faster refunds."}
+
 # ==================== TEMPORARY ADMIN ENDPOINT ====================
 @app.post("/api/admin/add-funds")
 def admin_add_funds(user_id: int, amount: float):
@@ -1082,15 +1217,11 @@ def get_services():
         response = requests.get(BASE_URL, params=params, timeout=15)
         data = response.json()
         
-        # Bulletproof removal of "full" service
         if isinstance(data, dict):
-            # Case 1: {"fb": "Facebook", "full": "Full rent"}
             data.pop("full", None)
-            # Case 2: {"status": "success", "services": [...]}
             if "services" in data and isinstance(data["services"], list):
                 data["services"] = [s for s in data["services"] if s.get("code") != "full"]
         elif isinstance(data, list):
-            # Case 3: [{"code": "fb", ...}, {"code": "full", ...}]
             data = [s for s in data if s.get("code") != "full"]
             
         return data
@@ -1131,7 +1262,6 @@ def buy_number(request: BuyRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Reject 'full' (rental) before trying to get prices
     if str(getattr(request, "service", "")).strip().lower() == "full":
         conn.close()
         raise HTTPException(status_code=400, detail="Full rent is not available yet. Please choose another service.")
