@@ -1359,18 +1359,49 @@ def check_sms(activation_id: str, http_request: Request):
     return {"status": text}
 
 @app.post("/api/cancel/{activation_id}")
+@app.post("/api/cancel/{activation_id}")
 def cancel_activation(activation_id: str, http_request: Request):
     _activation_owner(http_request, activation_id)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, cost, status FROM transactions WHERE activation_id = %s", (activation_id,))
-    transaction = cursor.fetchone()
-    if transaction and transaction[2] != 'CANCELLED':
-        cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (transaction[1], transaction[0]))
-        cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
-        conn.commit()
+    cursor.execute(
+        "SELECT user_id, cost, status, sms_code, created_at FROM transactions WHERE activation_id = %s",
+        (activation_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Activation not found.")
+    owner_id, cost, status, sms_code, created_at = row
+
+    if status == "CANCELLED":
+        conn.close()
+        return {"message": "Activation already cancelled"}
+    if status == "COMPLETED" or sms_code:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="This activation already received an SMS and cannot be refunded.",
+        )
+    if created_at is not None and (_utcnow() - created_at).total_seconds() < 120:
+        conn.close()
+        raise HTTPException(
+            status_code=429,
+            detail="This number was just purchased. Please wait before cancelling.",
+        )
+
+    cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (cost, owner_id))
+    cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
+    conn.commit()
     conn.close()
-    requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id}, timeout=15)
+    try:
+        requests.get(
+            BASE_URL,
+            params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id},
+            timeout=15,
+        )
+    except Exception:
+        pass
     return {"message": "Activation cancelled"}
 
 def _active_payload(user_id: int):
