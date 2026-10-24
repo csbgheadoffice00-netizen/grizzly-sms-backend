@@ -22,8 +22,6 @@ from typing import Optional
 app = FastAPI()
 
 # ==================== SECURITY GATES (self-contained) ====================
-# Inlined on purpose: no `from admin_gate import ...`, no extra files.
-# Only the Python standard library and Starlette (installed with FastAPI).
 import hmac as _hmac
 import logging as _logging
 from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
@@ -31,11 +29,7 @@ from starlette.responses import JSONResponse as _JSON
 
 _log = _logging.getLogger("security_gate")
 
-# ---- 1. Admin gate: protects every /api/admin/* route -------------------
-# Fails CLOSED. If ADMIN_API_KEY is not configured on the server, all admin
-# requests are denied instead of being left open.
 _ADMIN_PREFIX = "/api/admin"
-
 
 class AdminGate(_BaseMW):
     async def dispatch(self, request, call_next):
@@ -56,11 +50,7 @@ class AdminGate(_BaseMW):
             return await call_next(request)
         return _JSON(status_code=403, content={"detail": "Invalid or missing admin key."})
 
-
-# ---- 2. Docs gate: hides /docs, /redoc, /openapi.json -------------------
-# Set DOCS_ENABLED=1 in the environment to turn them back on.
 _DOCS_HIDDEN = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
-
 
 class DocsGate(_BaseMW):
     async def dispatch(self, request, call_next):
@@ -74,9 +64,7 @@ class DocsGate(_BaseMW):
             given = request.headers.get("x-admin-key", "")
             if given and _hmac.compare_digest(given, admin_key):
                 return await call_next(request)
-        # 404 rather than 403: do not confirm that these paths exist.
         return _JSON(status_code=404, content={"detail": "Not Found"})
-
 
 app.add_middleware(AdminGate)
 app.add_middleware(DocsGate)
@@ -102,10 +90,6 @@ MAX_REFERRALS = 8
 FREE_REFERRAL_LIMIT = 3
 
 # --- Auth / token config (v2) ---
-# AUTH_MODE=compat : legacy /api/<x>/{user_id} routes still answer anonymous
-#                    callers (logged as warnings) so the current APK keeps
-#                    working. A supplied token is always enforced.
-# AUTH_MODE=strict : those routes require a valid token (IDOR closed).
 AUTH_MODE = os.getenv("AUTH_MODE", "compat").strip().lower()
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip()
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "168"))
@@ -118,14 +102,10 @@ MAX_PASSWORD_LENGTH = 200
 
 _EFFECTIVE_AUTH_SECRET = AUTH_SECRET or secrets.token_urlsafe(48)
 if not AUTH_SECRET:
-    _log.warning(
-        "AUTH_SECRET is not set - generated a random key at startup. "
-        "Every token becomes invalid on the next restart. Set AUTH_SECRET on Render."
-    )
+    _log.warning("AUTH_SECRET is not set - generated a random key at startup. Every token becomes invalid on the next restart. Set AUTH_SECRET on Render.")
 if AUTH_MODE not in ("compat", "strict"):
     _log.warning("Unknown AUTH_MODE=%r - falling back to compat", AUTH_MODE)
     AUTH_MODE = "compat"
-_log.warning("AUTH_MODE=%s (compat keeps legacy routes open; strict requires tokens)", AUTH_MODE)
 
 # NOWPayments Config
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
@@ -133,14 +113,11 @@ NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
 # Apirone Config (NEW)
 APIRONE_API_KEY = os.getenv("APIRONE_API_KEY", "PASTE_YOUR_APIRONE_KEY_HERE")
-# Apirone ACCOUNT id (apr-... or btc-...). NOT the currency "btc".
 APIRONE_ACCOUNT = os.getenv("APIRONE_ACCOUNT", "").strip()
 APIRONE_WEBHOOK_URL = os.getenv(
     "APIRONE_WEBHOOK_URL",
     "https://grizzly-sms-backend.onrender.com/api/payment/apirone-webhook",
 )
-# Credit the wallet only after the invoice reaches "completed" (block confirmed).
-# Set to 0 to also credit on the earlier "paid"/"overpaid" status.
 APIRONE_REQUIRE_CONFIRMATION = os.getenv("APIRONE_REQUIRE_CONFIRMATION", "1") == "1"
 
 # Resend Email Config
@@ -176,7 +153,6 @@ def init_db():
     except psycopg2.errors.DuplicateColumn:
         conn.rollback()
 
-    # v2 auth columns: reset-code expiry, attempt lockout, token revocation.
     for _stmt in (
         "ALTER TABLE users ADD COLUMN verification_code_expires TIMESTAMP",
         "ALTER TABLE users ADD COLUMN verification_attempts INTEGER DEFAULT 0",
@@ -218,14 +194,11 @@ def init_db():
 init_db()
 
 def hash_password(password: str) -> str:
-    """PBKDF2-HMAC-SHA256, 260k iterations, per-user random salt."""
     salt = secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS)
     return "pbkdf2_sha256$%d$%s$%s" % (PBKDF2_ITERATIONS, salt, dk.hex())
 
-
 def verify_password(password: str, stored: str) -> bool:
-    """Accepts pbkdf2_sha256$... and legacy unsalted sha256 hex."""
     if not stored:
         return False
     if stored.startswith("pbkdf2_sha256$"):
@@ -237,7 +210,6 @@ def verify_password(password: str, stored: str) -> bool:
             return False
     legacy = hashlib.sha256(password.encode()).hexdigest()
     return hmac.compare_digest(legacy, stored)
-
 
 def needs_rehash(stored: str) -> bool:
     if not stored or not stored.startswith("pbkdf2_sha256$"):
@@ -259,7 +231,6 @@ def make_unique_code(cursor) -> str:
         if not cursor.fetchone():
             return code
     raise Exception("Could not generate unique referral code")
-
 
 def generate_6_digit_code():
     return ''.join(secrets.choice(string.digits) for _ in range(6))
@@ -299,21 +270,15 @@ class ResetRequest(BaseModel):
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
-
 def _b64e(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
 
 def _b64d(text_value: str) -> bytes:
     return base64.urlsafe_b64decode(text_value + "=" * (-len(text_value) % 4))
 
-
 def create_access_token(user_id: int) -> str:
-    """Compact HS256 JWT. Standard library only (no PyJWT dependency)."""
     now = time.time()
     header = {"alg": "HS256", "typ": "JWT"}
-    # iat keeps sub-second precision so a token minted moments after a password
-    # reset is never mistaken for one issued before it.
     payload = {"sub": str(user_id), "iat": round(now, 6), "exp": int(now) + TOKEN_TTL_HOURS * 3600}
     head = _b64e(json.dumps(header, separators=(",", ":")).encode())
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
@@ -321,9 +286,7 @@ def create_access_token(user_id: int) -> str:
     sig = hmac.new(_EFFECTIVE_AUTH_SECRET.encode(), signing_input, hashlib.sha256).digest()
     return "%s.%s.%s" % (head, body, _b64e(sig))
 
-
 def verify_access_token(token: str) -> Optional[dict]:
-    """HS256 only. No alg:none, no algorithm negotiation, no leeway beyond exp."""
     parts = (token or "").split(".")
     if len(parts) != 3:
         return None
@@ -350,16 +313,13 @@ def verify_access_token(token: str) -> Optional[dict]:
         return None
     return payload
 
-
 def bearer_token(request: Request) -> Optional[str]:
     raw = request.headers.get("authorization", "")
     if raw.lower().startswith("bearer "):
         return raw[7:].strip() or None
     return None
 
-
 def _token_revoked(user_id: int, issued_at: int) -> bool:
-    """True if the token predates the last password reset."""
     if not issued_at:
         return False
     try:
@@ -369,72 +329,40 @@ def _token_revoked(user_id: int, issued_at: int) -> bool:
         row = cursor.fetchone()
         conn.close()
     except Exception:
-        return False  # fail open on DB hiccups: never lock a user out
+        return False
     if not row or row[0] is None or isinstance(row[0], str):
         return False
     issued = datetime.fromtimestamp(float(issued_at), timezone.utc).replace(tzinfo=None)
     return issued < row[0]
 
-
 def auth_from_request(request: Request):
-    """User id from the bearer token, or None when no token was sent.
-
-    A malformed/expired token is a 401, never silently anonymous.
-    """
     token = bearer_token(request)
     if not token:
         return None
     payload = verify_access_token(token)
     if payload is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Invalid or expired token.", headers={"WWW-Authenticate": "Bearer"})
     if _token_revoked(payload["sub"], float(payload.get("iat") or 0)):
-        raise HTTPException(
-            status_code=401,
-            detail="Session expired. Please log in again.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.", headers={"WWW-Authenticate": "Bearer"})
     return payload["sub"]
-
 
 def require_user(request: Request) -> int:
     user_id = auth_from_request(request)
     if user_id is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
     return user_id
 
-
 def resolve_self(request: Request, user_id: int) -> int:
-    """Authorise access to user_id's data.
-
-    Token present  -> must match user_id (403 otherwise).
-    No token       -> 401 in strict mode, allowed + logged in compat mode.
-    """
     token_user = auth_from_request(request)
     if token_user is not None:
         if token_user != user_id:
             raise HTTPException(status_code=403, detail="You can only access your own account.")
         return token_user
     if AUTH_MODE == "strict":
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    _log.warning(
-        "AUTH_MODE=compat: anonymous access to user %s (ip=%s)", user_id, _client_ip(request)
-    )
+        raise HTTPException(status_code=401, detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
+    _log.warning("AUTH_MODE=compat: anonymous access to user %s (ip=%s)", user_id, _client_ip(request))
     return user_id
 
-
-# --- in-memory sliding-window rate limiter (one Render instance) ---
 _RATE_LOCK = threading.Lock()
 _RATE_HITS = {}
 _RATE_RULES = {
@@ -446,16 +374,13 @@ _RATE_RULES = {
     "reset": (10, 300),
 }
 
-
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
-
 def rate_limit(request: Request, bucket: str) -> None:
-    """Raise 429 when this IP exceeds the bucket's limit."""
     if not RATE_LIMIT_ENABLED:
         return
     limit, window = _RATE_RULES.get(bucket, (30, 60))
@@ -465,27 +390,20 @@ def rate_limit(request: Request, bucket: str) -> None:
         hits = [t for t in _RATE_HITS.get(key, []) if now - t < window]
         if len(hits) >= limit:
             retry_after = max(1, int(window - (now - hits[0])) + 1)
-            raise HTTPException(
-                status_code=429,
-                detail="Too many requests. Please slow down and try again shortly.",
-                headers={"Retry-After": str(retry_after)},
-            )
+            raise HTTPException(status_code=429, detail="Too many requests. Please slow down and try again shortly.", headers={"Retry-After": str(retry_after)})
         hits.append(now)
         _RATE_HITS[key] = hits
         if len(_RATE_HITS) > 5000:
             for stale in [k for k, v in _RATE_HITS.items() if not v or now - v[-1] > 3600]:
                 _RATE_HITS.pop(stale, None)
 
-
 def _code_expired(expires) -> bool:
     if expires is None or isinstance(expires, str):
         return False
     return _utcnow() > expires
 
-
 def _generic_messages() -> bool:
     return AUTH_GENERIC_RESPONSES
-
 
 # ==================== EMAIL & AUTH ENDPOINTS ====================
 @app.post("/api/auth/request-code")
@@ -532,10 +450,7 @@ def verify_code(request: VerifyRequest, http_request: Request):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, verification_code, verification_code_expires, verification_attempts FROM users WHERE email = %s",
-        (email,),
-    )
+    cursor.execute("SELECT id, verification_code, verification_code_expires, verification_attempts FROM users WHERE email = %s", (email,))
     user = cursor.fetchone()
 
     if not user:
@@ -548,10 +463,7 @@ def verify_code(request: VerifyRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=400, detail="No active verification code. Please request a new one.")
     if _code_expired(expires):
-        cursor.execute(
-            "UPDATE users SET verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s",
-            (user_id,),
-        )
+        cursor.execute("UPDATE users SET verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s", (user_id,))
         conn.commit()
         conn.close()
         raise HTTPException(status_code=400, detail="This code has expired. Please request a new one.")
@@ -564,10 +476,7 @@ def verify_code(request: VerifyRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=400, detail="Invalid verification code.")
 
-    cursor.execute(
-        "UPDATE users SET is_verified = 1, verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s",
-        (user_id,),
-    )
+    cursor.execute("UPDATE users SET is_verified = 1, verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s", (user_id,))
     conn.commit()
     conn.close()
     return {"message": "Account verified successfully!", "user_id": user_id}
@@ -585,7 +494,6 @@ def forgot_password(request: EmailRequest, http_request: Request):
 
     if not exists:
         conn.close()
-        # Generic answer: do not confirm which emails are registered.
         if _generic_messages():
             return {"message": "If that email is registered, a reset code has been sent."}
         raise HTTPException(status_code=404, detail="Email not found.")
@@ -605,8 +513,6 @@ def forgot_password(request: EmailRequest, http_request: Request):
             "html": f"<p>Your password reset code is: <strong>{code}</strong></p><p>This code expires in {RESET_CODE_TTL_MINUTES} minutes.</p>"
         })
     except Exception as e:
-        # Same generic answer as an unknown address: a provider outage must not
-        # become a way to tell registered emails from unregistered ones.
         _log.error("forgot-password: resend failed for %s: %s", email, e)
 
     return {"message": "If that email is registered, a reset code has been sent."}
@@ -623,10 +529,7 @@ def reset_password(request: ResetRequest, http_request: Request):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, verification_code, verification_code_expires, verification_attempts FROM users WHERE email = %s",
-        (email,),
-    )
+    cursor.execute("SELECT id, verification_code, verification_code_expires, verification_attempts FROM users WHERE email = %s", (email,))
     user = cursor.fetchone()
 
     if not user:
@@ -641,10 +544,7 @@ def reset_password(request: ResetRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=400, detail="No reset code requested. Please request a new one.")
     if _code_expired(expires):
-        cursor.execute(
-            "UPDATE users SET verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s",
-            (user_id,),
-        )
+        cursor.execute("UPDATE users SET verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0 WHERE id = %s", (user_id,))
         conn.commit()
         conn.close()
         raise HTTPException(status_code=400, detail="This reset code has expired. Please request a new one.")
@@ -658,8 +558,7 @@ def reset_password(request: ResetRequest, http_request: Request):
         raise HTTPException(status_code=400, detail="Invalid reset code.")
 
     cursor.execute(
-        "UPDATE users SET password_hash = %s, verification_code = NULL, verification_code_expires = NULL, "
-        "verification_attempts = 0, token_invalid_before = %s WHERE id = %s",
+        "UPDATE users SET password_hash = %s, verification_code = NULL, verification_code_expires = NULL, verification_attempts = 0, token_invalid_before = %s WHERE id = %s",
         (hash_password(request.new_password), _utcnow(), user_id),
     )
     conn.commit()
@@ -710,17 +609,13 @@ def register(request: RegisterRequest, http_request: Request):
     start_balance = REFERRAL_BONUS if referrer_id else STARTING_BALANCE
 
     cursor.execute(
-        """INSERT INTO users (email, password_hash, balance, referral_code, referred_by, is_verified)
-           VALUES (%s, %s, %s, %s, %s, 0) RETURNING id""",
+        "INSERT INTO users (email, password_hash, balance, referral_code, referred_by, is_verified) VALUES (%s, %s, %s, %s, %s, 0) RETURNING id",
         (email, hash_password(password), start_balance, new_code, referrer_id)
     )
     new_user_id = cursor.fetchone()[0]
 
     if referrer_id:
-        cursor.execute(
-            """UPDATE users SET balance = balance + %s, referral_count = referral_count + 1, referral_earnings = referral_earnings + %s WHERE id = %s""",
-            (REFERRAL_BONUS, REFERRAL_BONUS, referrer_id)
-        )
+        cursor.execute("UPDATE users SET balance = balance + %s, referral_count = referral_count + 1, referral_earnings = referral_earnings + %s WHERE id = %s", (REFERRAL_BONUS, REFERRAL_BONUS, referrer_id))
 
     conn.commit()
     conn.close()
@@ -744,14 +639,10 @@ def login(request: LoginRequest, http_request: Request):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, balance, referral_code, is_verified, password_hash FROM users WHERE email = %s",
-        (email,),
-    )
+    cursor.execute("SELECT id, balance, referral_code, is_verified, password_hash FROM users WHERE email = %s", (email,))
     user = cursor.fetchone()
 
     if not user:
-        # Same work as a real check, so response timing does not reveal accounts.
         verify_password(request.password, "0" * 64)
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -791,7 +682,6 @@ def _profile_payload(user_id: int):
         return None
     return {"user_id": user[0], "email": user[1], "balance": user[2], "referral_code": user[3] or "", "referral_count": user[4] or 0, "referral_earnings": user[5] or 0.0}
 
-
 def _referral_payload(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -801,7 +691,6 @@ def _referral_payload(user_id: int):
     if not row:
         return None
     return {"referral_code": row[0] or "", "referral_count": row[1] or 0, "referral_earnings": row[2] or 0.0, "bonus_per_referral": REFERRAL_BONUS}
-
 
 @app.get("/api/user/{user_id}")
 def get_user(user_id: int, http_request: Request):
@@ -819,7 +708,6 @@ def get_referral_info(user_id: int, http_request: Request):
         raise HTTPException(status_code=404, detail="User not found")
     return payload
 
-# --- token-only replacements: use these from the next app build ---
 @app.get("/api/me")
 def get_me(http_request: Request):
     payload = _profile_payload(require_user(http_request))
@@ -845,7 +733,6 @@ async def create_invoice(request: TopUpRequest, http_request: Request):
 
     try:
         order_id = f"user_{request.user_id}_{int(random.random() * 1000000)}"
-        
         headers = {"x-api-key": NP_API_KEY, "Content-Type": "application/json"}
         payload = {
             "price_amount": request.amount,
@@ -863,23 +750,15 @@ async def create_invoice(request: TopUpRequest, http_request: Request):
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)",
-            (str(invoice_data['id']), request.user_id, request.amount, 'waiting')
-        )
+        cursor.execute("INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)", (str(invoice_data['id']), request.user_id, request.amount, 'waiting'))
         conn.commit()
         conn.close()
-
         return {"invoice_url": invoice_data['invoice_url']}
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail="Payment provider timed out. Please try again.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Payment provider error: {str(e)}")
 
-# ---------- Apirone (crypto) helpers ----------
-# Only currencies that are enabled on the Apirone account. tbtc (testnet) is
-# deliberately excluded. `decimals` matches the units-factor reported by
-# https://apirone.com/api/v2/accounts (OPTIONS).
 COINS = [
     {"code": "btc", "cb": "BTC", "name": "Bitcoin", "symbol": "BTC", "price_id": "bitcoin", "decimals": 8},
     {"code": "eth", "cb": "ETH", "name": "Ethereum", "symbol": "ETH", "price_id": "ethereum", "decimals": 18},
@@ -897,29 +776,21 @@ COINS = [
     {"code": "bnb", "cb": "BNB", "name": "BNB", "symbol": "BNB", "price_id": "binancecoin", "decimals": 18},
 ]
 COIN_BY_CODE = {c["code"]: c for c in COINS}
-DUST_MIN_UNITS = 1000  # for UTXO chains
-_price_cache = {}  # code -> (price_usd, timestamp)
-
+DUST_MIN_UNITS = 1000
+_price_cache = {}
 
 def _price_from_coinbase(symbol: str) -> float:
     try:
-        r = requests.get(
-            f"https://api.coinbase.com/v2/prices/{symbol}-USD/spot", timeout=10
-        )
+        r = requests.get(f"https://api.coinbase.com/v2/prices/{symbol}-USD/spot", timeout=10)
         if r.status_code == 200:
             return float(r.json()["data"]["amount"])
     except Exception:
         pass
     return 0.0
 
-
 def _price_from_coingecko(price_id: str) -> float:
     try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": price_id, "vs_currencies": "usd"},
-            timeout=12,
-        )
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": price_id, "vs_currencies": "usd"}, timeout=12)
         if r.status_code == 200:
             payload = r.json()
             if price_id in payload:
@@ -928,13 +799,7 @@ def _price_from_coingecko(price_id: str) -> float:
         pass
     return 0.0
 
-
 def get_asset_price_usd(code: str) -> float:
-    """USD price for a coin, cached 5 minutes.
-
-    Two independent sources so a rate-limited free API never blocks payments.
-    Stablecoins are pinned to 1.00.
-    """
     coin = COIN_BY_CODE.get(code)
     if coin is None:
         raise HTTPException(status_code=400, detail=f"Unsupported currency: {code}")
@@ -951,53 +816,29 @@ def get_asset_price_usd(code: str) -> float:
         price = _price_from_coingecko(coin["price_id"])
 
     if price <= 0:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Could not fetch the {code.upper()}/USD rate. Try again shortly.",
-        )
+        raise HTTPException(status_code=503, detail=f"Could not fetch the {code.upper()}/USD rate. Try again shortly.")
 
     _price_cache[code] = (price, now)
     return price
 
-
 def apirone_account_ready() -> bool:
     return bool(APIRONE_ACCOUNT) and APIRONE_ACCOUNT.startswith(("apr-", "btc-"))
 
-
 def to_base_units(amount_usd: float, price_usd: float, decimals: int) -> int:
-    """Convert a USD amount into the coin's smallest unit (satoshi/wei/sun...)."""
-    units = (
-        Decimal(str(amount_usd))
-        / Decimal(str(price_usd))
-        * (Decimal(10) ** decimals)
-    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    units = (Decimal(str(amount_usd)) / Decimal(str(price_usd)) * (Decimal(10) ** decimals)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return int(units)
-
 
 @app.get("/api/payment/coins")
 def list_coins():
-    return {
-        "coins": [
-            {
-                "code": c["code"],
-                "name": c["name"],
-                "symbol": c["symbol"],
-                "min_usd": 1.0,
-            }
-            for c in COINS
-        ]
-    }
-
+    return {"coins": [{"code": c["code"], "name": c["name"], "symbol": c["symbol"], "min_usd": 1.0} for c in COINS]}
 
 class CryptoTopUpRequest(BaseModel):
     user_id: int
     amount: float
     currency: str = "btc"
 
-
 @app.post("/api/payment/create-btc-invoice")
 async def create_btc_invoice(request: CryptoTopUpRequest, http_request: Request):
-    """Create a crypto invoice for any enabled coin (default Bitcoin)."""
     resolve_self(http_request, request.user_id)
     currency = (request.currency or "btc").strip().lower()
 
@@ -1008,10 +849,7 @@ async def create_btc_invoice(request: CryptoTopUpRequest, http_request: Request)
     if currency not in COIN_BY_CODE:
         raise HTTPException(status_code=400, detail=f"Unsupported currency: {currency}")
     if not apirone_account_ready():
-        raise HTTPException(
-            status_code=503,
-            detail="Crypto payments are not configured yet (APIRONE_ACCOUNT missing on the server).",
-        )
+        raise HTTPException(status_code=503, detail="Crypto payments are not configured yet (APIRONE_ACCOUNT missing on the server).")
 
     coin = COIN_BY_CODE[currency]
     price_usd = get_asset_price_usd(currency)
@@ -1043,10 +881,7 @@ async def create_btc_invoice(request: CryptoTopUpRequest, http_request: Request)
         raise HTTPException(status_code=502, detail=f"Apirone unreachable: {e}")
 
     if response.status_code not in (200, 201):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Apirone error {response.status_code}: {response.text[:300]}",
-        )
+        raise HTTPException(status_code=502, detail=f"Apirone error {response.status_code}: {response.text[:300]}")
 
     invoice_data = response.json()
     invoice_id = invoice_data.get("invoice")
@@ -1059,10 +894,7 @@ async def create_btc_invoice(request: CryptoTopUpRequest, http_request: Request)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)",
-            (invoice_id, request.user_id, request.amount, "waiting"),
-        )
+        cursor.execute("INSERT INTO payments (payment_id, user_id, amount, status) VALUES (%s, %s, %s, %s)", (invoice_id, request.user_id, request.amount, "waiting"))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1079,14 +911,8 @@ async def create_btc_invoice(request: CryptoTopUpRequest, http_request: Request)
         "asset_price_usd": price_usd,
     }
 
-
 @app.post("/api/payment/apirone-webhook")
 async def apirone_webhook(request: Request):
-    """Apirone invoice callback: {"account": "...", "invoice": "...", "status": "..."}.
-
-    Apirone does not sign these callbacks, so the status is re-checked against
-    the Apirone API before any balance is credited.
-    """
     try:
         payload = await request.json()
     except Exception:
@@ -1105,7 +931,6 @@ async def apirone_webhook(request: Request):
         return PlainTextResponse("retry", status_code=500)
 
     status = info.get("status")
-
     ok_statuses = {"completed"} if APIRONE_REQUIRE_CONFIRMATION else {"paid", "overpaid", "completed"}
     if status not in ok_statuses:
         return PlainTextResponse("ok")
@@ -1115,10 +940,7 @@ async def apirone_webhook(request: Request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT user_id, amount, status FROM payments WHERE payment_id = %s",
-            (invoice_id,),
-        )
+        cursor.execute("SELECT user_id, amount, status FROM payments WHERE payment_id = %s", (invoice_id,))
         row = cursor.fetchone()
         if row:
             user_id, amount_usd, db_status = row
@@ -1145,16 +967,11 @@ async def apirone_webhook(request: Request):
                 return PlainTextResponse("ok")
             price_usd = get_asset_price_usd(currency)
             paid_units = Decimal(str(info.get("amount", 0) or 0))
-            amount_usd = float(
-                (paid_units / (Decimal(10) ** coin["decimals"])) * Decimal(str(price_usd))
-            )
+            amount_usd = float((paid_units / (Decimal(10) ** coin["decimals"])) * Decimal(str(price_usd)))
             amount_usd = round(amount_usd, 2)
 
         cursor.execute("UPDATE payments SET status = 'finished' WHERE payment_id = %s", (invoice_id,))
-        cursor.execute(
-            "UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s",
-            (amount_usd, user_id),
-        )
+        cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (amount_usd, user_id))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1163,7 +980,6 @@ async def apirone_webhook(request: Request):
 
     print(f"Apirone invoice {invoice_id} {status}: credited ${amount_usd} to user {user_id}")
     return PlainTextResponse("ok")
-
 
 @app.post("/api/payment/webhook")
 async def payment_webhook(request: Request):
@@ -1253,11 +1069,7 @@ def buy_number(request: BuyRequest, http_request: Request):
         user_id = token_user
     else:
         if AUTH_MODE == "strict":
-            raise HTTPException(
-                status_code=401,
-                detail="Authentication required.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+            raise HTTPException(status_code=401, detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
         if not request.user_id:
             raise HTTPException(status_code=400, detail="user_id is required.")
         user_id = request.user_id
@@ -1271,12 +1083,8 @@ def buy_number(request: BuyRequest, http_request: Request):
         conn.close()
         raise HTTPException(status_code=404, detail="User not found")
 
-    # --- Facebook route gate (OBSERVE ONLY): log, never block ---
     if str(getattr(request, "service", "")).lower() == "fb" and getattr(request, "country", None) == 187:
-        _log.warning(
-            "fb_gate OBSERVE: facebook order requested country=187 user=%s",
-            user_id,
-        )
+        _log.warning("fb_gate OBSERVE: facebook order requested country=187 user=%s", user_id)
 
     price_params = {"api_key": API_KEY, "action": "getPrices", "service": request.service, "country": request.country}
     try:
@@ -1328,14 +1136,9 @@ def _activation_owner(http_request: Request, activation_id: str):
             raise HTTPException(status_code=403, detail="This activation belongs to another account.")
         return owner
     if AUTH_MODE == "strict":
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
     _log.warning("AUTH_MODE=compat: anonymous access to activation %s", activation_id)
     return owner
-
 
 def _iso_utc(dt):
     if dt is None:
@@ -1344,6 +1147,29 @@ def _iso_utc(dt):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
 
+def _settle_cancelled(activation_id: str) -> bool:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id, cost, status, sms_code FROM transactions WHERE activation_id = %s",
+        (activation_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+    owner_id, cost, status, sms_code = row
+    if status in ("CANCELLED", "COMPLETED") or sms_code:
+        conn.close()
+        return False
+    cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (cost, owner_id))
+    cursor.execute(
+        "UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s AND status = 'PENDING'",
+        (activation_id,),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 @app.get("/api/check-sms/{activation_id}")
 def check_sms(activation_id: str, http_request: Request):
@@ -1364,6 +1190,8 @@ def check_sms(activation_id: str, http_request: Request):
             requests.get(BASE_URL, params={"api_key": API_KEY, "action": "setStatus", "status": 6, "id": activation_id})
         else:
             conn.close()
+    elif "STATUS_CANCEL" in text:
+        _settle_cancelled(activation_id)
     return {"status": text}
 
 @app.post("/api/cancel/{activation_id}")
@@ -1390,25 +1218,21 @@ def cancel_activation(activation_id: str, http_request: Request):
             status_code=409,
             detail="This activation already received an SMS and cannot be refunded.",
         )
-    if created_at is not None and (_utcnow() - created_at).total_seconds() < 120:
-        conn.close()
-        raise HTTPException(
-            status_code=429,
-            detail="This number was just purchased. Please wait before cancelling.",
-        )
 
     cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (cost, owner_id))
     cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
     conn.commit()
     conn.close()
-    try:
-        requests.get(
+    
+    threading.Thread(
+        target=lambda: requests.get(
             BASE_URL,
             params={"api_key": API_KEY, "action": "setStatus", "status": 8, "id": activation_id},
             timeout=15,
-        )
-    except Exception:
-        pass
+        ),
+        daemon=True,
+    ).start()
+    
     return {"message": "Activation cancelled"}
 
 def _active_payload(user_id: int):
@@ -1439,7 +1263,6 @@ def _active_payload(user_id: int):
 
     return {"has_active": True, "activations": activations}
 
-
 def _history_payload(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1447,7 +1270,6 @@ def _history_payload(user_id: int):
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"id": r[0], "phone_number": r[1], "service": r[2], "country": r[3], "status": r[4], "sms_code": r[5], "cost": r[6], "created_at": _iso_utc(r[7])} for r in rows]}
-
 
 @app.get("/api/active/{user_id}")
 def get_active(user_id: int, http_request: Request):
