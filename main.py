@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -1130,11 +1130,11 @@ def paystack_initialize(body: TopupRequest, http_request: Request):
     conn.commit()
     conn.close()
 
-     r= requests.post(
+    r = requests.post(
         "https://api.paystack.co/transaction/initialize",
         headers={"Authorization": f"Bearer {PAYSTACK_SECRET}", "Content-Type": "application/json"},
         json={"email": email, "amount": body.amount_ngn * 100, "reference": reference,
-              "callback_url": "https://fbgsms.com/payment-done"
+              "currency": "NGN", "callback_url": "https://grizzly-sms-backend.onrender.com/payment-done"},
         timeout=25,
     )
     data = r.json()
@@ -1480,3 +1480,16 @@ def get_me_active(http_request: Request):
 @app.get("/api/me/history")
 def get_me_history(http_request: Request):
     return _history_payload(require_user(http_request))
+
+# ==================== PAYMENT DONE PAGE ====================
+@app.get("/payment-done", response_class=HTMLResponse)
+def payment_done():
+    return """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment received</title></head>
+<body style="font-family:system-ui;background:#0f1115;color:#eaeaea;margin:0;
+display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+<div><h2>Payment received</h2>
+<p>Your balance updates in the app within a few seconds.</p>
+<p>You can close this page and return to FBG SMS.</p></div>
+</body></html>"""
