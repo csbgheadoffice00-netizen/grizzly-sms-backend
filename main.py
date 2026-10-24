@@ -193,6 +193,39 @@ def init_db():
 
 init_db()
 
+# ==================== BACKGROUND SWEEPER ====================
+def _sweep_stale_activations():
+    while True:
+        try:
+            time.sleep(60)
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            # Refund the user
+            cursor.execute("""
+                UPDATE users u
+                SET balance = balance + t.cost
+                FROM transactions t
+                WHERE t.user_id = u.id
+                  AND t.status = 'PENDING'
+                  AND t.sms_code IS NULL
+                  AND t.created_at < NOW() - INTERVAL '10 minutes'
+            """)
+            # Mark transaction as cancelled
+            cursor.execute("""
+                UPDATE transactions
+                SET status = 'CANCELLED'
+                WHERE status = 'PENDING'
+                  AND sms_code IS NULL
+                  AND created_at < NOW() - INTERVAL '10 minutes'
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            _log.warning("sweep failed: %s", e)
+
+threading.Thread(target=_sweep_stale_activations, daemon=True).start()
+# ===========================================================
+
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS)
