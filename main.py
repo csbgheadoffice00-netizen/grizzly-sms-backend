@@ -1179,11 +1179,14 @@ def check_sms(activation_id: str, http_request: Request):
     text = response.text
     if "STATUS_OK" in text:
         code = text.split(":")[1]
+        if code.strip() in ("", "999999", "000000"):
+            return {"status": text, "ignored": True}
+            
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM transactions WHERE activation_id = %s", (activation_id,))
         row = cursor.fetchone()
-        if row and row[0] != 'COMPLETED':
+        if row and row[0] not in ('COMPLETED', 'CANCELLED'):
             cursor.execute("UPDATE transactions SET status = 'COMPLETED', sms_code = %s WHERE activation_id = %s", (code, activation_id))
             conn.commit()
             conn.close()
