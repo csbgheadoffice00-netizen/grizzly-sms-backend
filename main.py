@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
-import psycopg2
+import psycopg2A
 import hashlib
 import random
 import string
@@ -21,7 +21,7 @@ from typing import Optional
 
 # --- NEW DOMAIN CONFIG ---
 SITE_URL = "https://fbgsms.com"
-APK_URL = "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk"
+APK_URL = "https://github.com/csbgheadoffice00-netizen/fbg-production-build/releases/download/v1.3.1/app-release.4.apk"
 
 app = FastAPI()
 
