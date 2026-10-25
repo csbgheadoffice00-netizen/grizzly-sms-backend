@@ -21,7 +21,7 @@ from typing import Optional
 
 # --- NEW DOMAIN CONFIG ---
 SITE_URL = "https://fbgsms.com"
-APK_URL = "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk"
+APK_URL = "https://github.com/csbgheadoffice00-netizen/fbg-production-build/releases/download/v1.3.2/app-release.apk"
 
 app = FastAPI()
 
