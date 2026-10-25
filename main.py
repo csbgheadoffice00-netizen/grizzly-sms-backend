@@ -1224,6 +1224,7 @@ display:flex;flex-direction:column;align-items:center;justify-content:center;hei
        style="display:inline-block;margin-top:16px;padding:14px 28px;background:#22c55e;
        color:#0f1115;font-weight:700;border-radius:10px;text-decoration:none">Download APK</a>
     <p style="opacity:.6;font-size:13px;margin-bottom:0;margin-top:20px;">Android 7.0+ &middot; allow installs from this source</p>
+<p style="opacity:.8;font-size:12px;color:#fbbf24;margin-top:15px;max-width:300px;margin-left:auto;margin-right:auto;">Note: Android may show a "File might be harmful" warning. This is normal for direct APK downloads. Tap <b>"Download anyway"</b>.</p>
 </div>
 </body></html>"""
 
