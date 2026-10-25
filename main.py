@@ -1533,3 +1533,16 @@ display:flex;align-items:center;justify-content:center;height:100vh;text-align:c
 <p>Your balance updates in the app within a few seconds.</p>
 <p>You can close this page and return to FBG SMS.</p></div>
 </body></html>"""
+
+import os
+from fastapi.staticfiles import StaticFiles
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---- Flutter web app (served at https://fbgsms.com/web/) ----
+_webapp_dir = os.path.join(BASE_DIR, "webapp")
+if os.path.isdir(_webapp_dir):
+    app.mount("/web", StaticFiles(directory=_webapp_dir, html=True), name="webapp")
+else:
+    print("WARNING: webapp/ directory not found — /web/ will 404")
+    
