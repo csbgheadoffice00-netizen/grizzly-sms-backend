@@ -21,7 +21,7 @@ from typing import Optional
 
 app = FastAPI()
 
-# ==================== SECURITY GATES (self-contained) ====================
+# ==================== SECURITY GATES ====================
 import hmac as _hmac
 import logging as _logging
 from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
@@ -89,7 +89,7 @@ STARTING_BALANCE = 0.00
 MAX_REFERRALS = 8
 FREE_REFERRAL_LIMIT = 3
 
-# --- Auth / token config (v2) ---
+# --- Auth / token config ---
 AUTH_MODE = os.getenv("AUTH_MODE", "strict").strip().lower()
 AUTH_SECRET = os.getenv("AUTH_SECRET", "").strip()
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "168"))
@@ -193,7 +193,6 @@ def init_db():
         )
     """)
     
-    # Paystack Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS paystack_payments (
             reference TEXT PRIMARY KEY,
@@ -210,7 +209,7 @@ def init_db():
 
 init_db()
 
-# ==================== BACKGROUND SWEEPER (8 MINUTES) ====================
+# ==================== BACKGROUND SWEEPER ====================
 def _sweep_stale_activations():
     while True:
         try:
@@ -1185,12 +1184,28 @@ def paystack_verify(reference: str, http_request: Request):
     conn.close()
     return {"status": row[0] if row else "unknown"}
 
+# ==================== APP UPDATE & DOWNLOAD ====================
 @app.get("/api/app/version")
 def app_version():
     return {"versionCode": 2003,
             "versionName": "1.3.1",
             "url": "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk",
             "notes": "Bug fixes and faster refunds."}
+
+@app.get("/download", response_class=HTMLResponse)
+def download_page():
+    return """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FBG SMS</title></head>
+<body style="font-family:system-ui;background:#0f1115;color:#eaeaea;margin:0;
+display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+<div><h2>FBG SMS</h2>
+<p>Virtual numbers for SMS verification.</p>
+<p><a href="https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk"
+style="display:inline-block;margin-top:16px;padding:14px 28px;background:#22c55e;
+color:#0f1115;font-weight:700;border-radius:10px;text-decoration:none">Download APK</a></p>
+<p style="opacity:.6;font-size:13px">Android 7.0+ &middot; allow installs from this source</p>
+</div></body></html>"""
 
 # ==================== REFERENCE DATA & NUMBER ENDPOINTS ====================
 @app.get("/api/countries")
@@ -1396,7 +1411,7 @@ def cancel_activation(activation_id: str, http_request: Request):
             status_code=409,
             detail="This activation already received an SMS and cannot be refunded.",
         )
-
+        
     cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (cost, owner_id))
     cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
     conn.commit()
