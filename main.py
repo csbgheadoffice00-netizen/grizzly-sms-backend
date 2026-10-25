@@ -111,7 +111,7 @@ if AUTH_MODE not in ("compat", "strict"):
 NP_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
 NP_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
 
-# Paystack Config (NEW)
+# Paystack Config
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
 NGN_PER_USD = float(os.getenv("NGN_PER_USD", "1500"))
 
@@ -193,7 +193,7 @@ def init_db():
         )
     """)
     
-    # NEW: Paystack Table
+    # Paystack Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS paystack_payments (
             reference TEXT PRIMARY KEY,
@@ -1069,7 +1069,7 @@ async def payment_webhook(request: Request):
 
     return {"status": "success"}
 
-# ==================== PAYSTACK ENDPOINTS (NEW) ====================
+# ==================== PAYSTACK ENDPOINTS ====================
 def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1189,7 +1189,7 @@ def paystack_verify(reference: str, http_request: Request):
 def app_version():
     return {"versionCode": 2003,
             "versionName": "1.3.1",
-            "url": "https://fbgsms.com/app/fbg-sms-latest.apk",
+            "url": "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk",
             "notes": "Bug fixes and faster refunds."}
 
 # ==================== TEMPORARY ADMIN ENDPOINT ====================
