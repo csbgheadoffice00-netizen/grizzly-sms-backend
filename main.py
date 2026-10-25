@@ -130,7 +130,10 @@ resend.api_key = RESEND_API_KEY
 
 # ==================== DATABASE SETUP ====================
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    # We turn on autocommit to prevent ALTER TABLE errors from rolling back CREATE TABLE
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True 
+    return conn
 
 def init_db():
     conn = get_db_connection()
@@ -152,21 +155,20 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0;")
-    except psycopg2.errors.DuplicateColumn:
-        conn.rollback()
-
+    
+    # Attempt to add v2 columns. If they exist, ignore the error.
     for _stmt in (
+        "ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN verification_code_expires TIMESTAMP",
         "ALTER TABLE users ADD COLUMN verification_attempts INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN token_invalid_before TIMESTAMP",
     ):
         try:
             cursor.execute(_stmt)
-            conn.commit()
         except psycopg2.errors.DuplicateColumn:
-            conn.rollback()
+            pass # Column already exists, safe to ignore
+        except Exception as e:
+            _log.warning("DB init warning: %s", e)
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
@@ -204,7 +206,6 @@ def init_db():
         )
     """)
     
-    conn.commit()
     conn.close()
 
 init_db()
@@ -1088,7 +1089,7 @@ def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
         conn.close()
         return {"ok": False, "reason": "amount_mismatch"}
 
-    # Atomic claim: only one concurrent request can flip the status.
+    # Atomic claim
     cursor.execute("UPDATE paystack_payments SET status = 'finished' WHERE reference = %s AND status = 'pending'", (reference,))
     if cursor.rowcount != 1:
         conn.rollback()
@@ -1411,7 +1412,7 @@ def cancel_activation(activation_id: str, http_request: Request):
             status_code=409,
             detail="This activation already received an SMS and cannot be refunded.",
         )
-        
+
     cursor.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (cost, owner_id))
     cursor.execute("UPDATE transactions SET status = 'CANCELLED' WHERE activation_id = %s", (activation_id,))
     conn.commit()
