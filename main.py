@@ -1200,7 +1200,10 @@ def app_version():
             "versionName": "1.3.1",
             "url": f"{SITE_URL}/app/fbg-sms-latest.apk",
             "notes": "Bug fixes and faster refunds."}
-
+    
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/download", status_code=302)
 @app.get("/download", response_class=HTMLResponse)
 def download_page():
     return f"""<!doctype html><html><head><meta charset="utf-8">
