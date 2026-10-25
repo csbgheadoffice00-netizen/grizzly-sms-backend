@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, HTMLResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -18,6 +18,10 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+# --- NEW DOMAIN CONFIG ---
+SITE_URL = "https://fbgsms.com"
+APK_URL = "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk"
 
 app = FastAPI()
 
@@ -120,7 +124,7 @@ APIRONE_API_KEY = os.getenv("APIRONE_API_KEY", "PASTE_YOUR_APIRONE_KEY_HERE")
 APIRONE_ACCOUNT = os.getenv("APIRONE_ACCOUNT", "").strip()
 APIRONE_WEBHOOK_URL = os.getenv(
     "APIRONE_WEBHOOK_URL",
-    "https://grizzly-sms-backend.onrender.com/api/payment/apirone-webhook",
+    f"{SITE_URL}/api/payment/apirone-webhook",
 )
 APIRONE_REQUIRE_CONFIRMATION = os.getenv("APIRONE_REQUIRE_CONFIRMATION", "1") == "1"
 
@@ -775,6 +779,10 @@ def get_me_referral(http_request: Request):
         raise HTTPException(status_code=404, detail="User not found")
     return payload
 
+@app.get("/app/fbg-sms-latest.apk")
+def latest_apk():
+    return RedirectResponse(APK_URL, status_code=302)
+
 # ==================== PAYMENT ENDPOINTS (NOWPayments & Apirone) ====================
 @app.post("/api/payment/create-invoice")
 async def create_invoice(request: TopUpRequest, http_request: Request):
@@ -792,9 +800,9 @@ async def create_invoice(request: TopUpRequest, http_request: Request):
             "price_currency": "usd",
             "order_id": order_id,
             "order_description": f"FBG SMS Wallet Top-Up for User {request.user_id}",
-            "ipn_callback_url": "https://grizzly-sms-backend.onrender.com/api/payment/webhook",
-            "success_url": "https://fbgsmsactivate.com/",
-            "cancel_url": "https://fbgsmsactivate.com/"
+            "ipn_callback_url": f"{SITE_URL}/api/payment/webhook",
+            "success_url": f"{SITE_URL}/",
+            "cancel_url": f"{SITE_URL}/"
         }
         
         response = requests.post("https://api.nowpayments.io/v1/invoice", json=payload, headers=headers, timeout=20)
@@ -1134,7 +1142,7 @@ def paystack_initialize(body: TopupRequest, http_request: Request):
         "https://api.paystack.co/transaction/initialize",
         headers={"Authorization": f"Bearer {PAYSTACK_SECRET}", "Content-Type": "application/json"},
         json={"email": email, "amount": body.amount_ngn * 100, "reference": reference,
-              "currency": "NGN", "callback_url": "https://grizzly-sms-backend.onrender.com/payment-done"},
+              "currency": "NGN", "callback_url": f"{SITE_URL}/payment-done"},
         timeout=25,
     )
     data = r.json()
@@ -1190,19 +1198,19 @@ def paystack_verify(reference: str, http_request: Request):
 def app_version():
     return {"versionCode": 2003,
             "versionName": "1.3.1",
-            "url": "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk",
+            "url": f"{SITE_URL}/app/fbg-sms-latest.apk",
             "notes": "Bug fixes and faster refunds."}
 
 @app.get("/download", response_class=HTMLResponse)
 def download_page():
-    return """<!doctype html><html><head><meta charset="utf-8">
+    return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FBG SMS</title></head>
 <body style="font-family:system-ui;background:#0f1115;color:#eaeaea;margin:0;
 display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
 <div><h2>FBG SMS</h2>
 <p>Virtual numbers for SMS verification.</p>
-<p><a href="https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk"
+<p><a href="{SITE_URL}/app/fbg-sms-latest.apk"
 style="display:inline-block;margin-top:16px;padding:14px 28px;background:#22c55e;
 color:#0f1115;font-weight:700;border-radius:10px;text-decoration:none">Download APK</a></p>
 <p style="opacity:.6;font-size:13px">Android 7.0+ &middot; allow installs from this source</p>
