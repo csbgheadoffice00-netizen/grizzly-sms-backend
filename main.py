@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
-import psycopg2A
+import psycopg2
 import hashlib
 import random
 import string
