@@ -134,7 +134,6 @@ resend.api_key = RESEND_API_KEY
 
 # ==================== DATABASE SETUP ====================
 def get_db_connection():
-    # We turn on autocommit to prevent ALTER TABLE errors from rolling back CREATE TABLE
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = True 
     return conn
@@ -160,7 +159,6 @@ def init_db():
         )
     """)
     
-    # Attempt to add v2 columns. If they exist, ignore the error.
     for _stmt in (
         "ALTER TABLE users ADD COLUMN has_topped_up INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN verification_code_expires TIMESTAMP",
@@ -170,7 +168,7 @@ def init_db():
         try:
             cursor.execute(_stmt)
         except psycopg2.errors.DuplicateColumn:
-            pass # Column already exists, safe to ignore
+            pass
         except Exception as e:
             _log.warning("DB init warning: %s", e)
     
@@ -245,7 +243,6 @@ def _sweep_stale_activations():
             _log.warning("sweep failed: %s", e)
 
 threading.Thread(target=_sweep_stale_activations, daemon=True).start()
-# ===========================================================
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -779,10 +776,6 @@ def get_me_referral(http_request: Request):
         raise HTTPException(status_code=404, detail="User not found")
     return payload
 
-@app.get("/app/fbg-sms-latest.apk")
-def latest_apk():
-    return RedirectResponse(APK_URL, status_code=302)
-
 # ==================== PAYMENT ENDPOINTS (NOWPayments & Apirone) ====================
 @app.post("/api/payment/create-invoice")
 async def create_invoice(request: TopUpRequest, http_request: Request):
@@ -1097,8 +1090,13 @@ def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
         conn.close()
         return {"ok": False, "reason": "amount_mismatch"}
 
-    # Atomic claim
-    cursor.execute("UPDATE paystack_payments SET status = 'finished' WHERE reference = %s AND status = 'pending'", (reference,))
+    # Atomic insert/update claim
+    cursor.execute(
+        "INSERT INTO paystack_payments (reference, user_id, amount_ngn, credit_usd, status) "
+        "VALUES (%s, %s, %s, %s, 'finished') "
+        "ON CONFLICT (reference) DO UPDATE SET status = 'finished' WHERE paystack_payments.status = 'pending'",
+        (reference, user_id, amount_ngn, credit_usd)
+    )
     if cursor.rowcount != 1:
         conn.rollback()
         conn.close()
@@ -1200,24 +1198,34 @@ def app_version():
             "versionName": "1.3.1",
             "url": f"{SITE_URL}/app/fbg-sms-latest.apk",
             "notes": "Bug fixes and faster refunds."}
-    
+
+@app.get("/app/fbg-sms-latest.apk")
+def latest_apk():
+    return RedirectResponse(APK_URL, status_code=302)
+
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse("/download", status_code=302)
+
 @app.get("/download", response_class=HTMLResponse)
 def download_page():
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FBG SMS</title></head>
-<body style="font-family:system-ui;background:#0f1115;color:#eaeaea;margin:0;
-display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
-<div><h2>FBG SMS</h2>
-<p>Virtual numbers for SMS verification.</p>
-<p><a href="{SITE_URL}/app/fbg-sms-latest.apk"
-style="display:inline-block;margin-top:16px;padding:14px 28px;background:#22c55e;
-color:#0f1115;font-weight:700;border-radius:10px;text-decoration:none">Download APK</a></p>
-<p style="opacity:.6;font-size:13px">Android 7.0+ &middot; allow installs from this source</p>
-</div></body></html>"""
+<body style="font-family:system-ui;background-color:#0f1115;color:#eaeaea;margin:0;
+display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;text-align:center;">
+<div style="background: rgba(26, 26, 26, 0.8); padding: 40px; border-radius: 20px; border: 1px solid #00FF41; box-shadow: 0 0 20px rgba(0, 255, 65, 0.2); max-width: 400px; width: 90%;">
+    <img src="https://raw.githubusercontent.com/csbgheadoffice00-netizen/fbg-production-build/main/assets/icon.png" 
+         alt="FBG SMS Logo" 
+         style="width: 100px; height: 100px; margin-bottom: 20px; border-radius: 20px;">
+    <h2 style="color:#00FF41; margin-top:0;">FBG SMS</h2>
+    <p>Virtual numbers for SMS verification.</p>
+    <a href="{SITE_URL}/app/fbg-sms-latest.apk"
+       style="display:inline-block;margin-top:16px;padding:14px 28px;background:#22c55e;
+       color:#0f1115;font-weight:700;border-radius:10px;text-decoration:none">Download APK</a>
+    <p style="opacity:.6;font-size:13px;margin-bottom:0;margin-top:20px;">Android 7.0+ &middot; allow installs from this source</p>
+</div>
+</body></html>"""
 
 # ==================== REFERENCE DATA & NUMBER ENDPOINTS ====================
 @app.get("/api/countries")
