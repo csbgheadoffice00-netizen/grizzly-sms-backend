@@ -1192,20 +1192,6 @@ def app_version():
             "url": "https://github.com/csbgheadoffice00-netizen/fbg-sms-/releases/download/v1.3.1/app-release.apk",
             "notes": "Bug fixes and faster refunds."}
 
-# ==================== TEMPORARY ADMIN ENDPOINT ====================
-@app.post("/api/admin/add-funds")
-def admin_add_funds(user_id: int, amount: float):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + %s, has_topped_up = 1 WHERE id = %s", (amount, user_id))
-    conn.commit()
-    cursor.execute("SELECT balance FROM users WHERE id = %s", (user_id,))
-    new_bal = cursor.fetchone()
-    conn.close()
-    if not new_bal:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"message": f"Added ${amount}", "new_balance": new_bal[0]}
-
 # ==================== REFERENCE DATA & NUMBER ENDPOINTS ====================
 @app.get("/api/countries")
 def get_countries():
