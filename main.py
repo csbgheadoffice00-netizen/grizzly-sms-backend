@@ -1201,13 +1201,29 @@ def app_version():
             "url": f"{SITE_URL}/app/fbg-sms-latest.apk",
             "notes": "Bug fixes and faster refunds."}
 
-@app.get("/app/fbg-sms-latest.apk")
-def latest_apk():
-    return RedirectResponse(APK_URL, status_code=302)
+import os
+from fastapi.responses import FileResponse
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse("/download", status_code=302)
+def landing():
+    path = os.path.join(BASE_DIR, "landing.html")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="text/html")
+    return RedirectResponse("/download", status_code=307)
+
+import os
+from fastapi.responses import FileResponse
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+@app.get("/", include_in_schema=False)
+def landing():
+    path = os.path.join(BASE_DIR, "landing.html")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="text/html")
+    return RedirectResponse("/download", status_code=307)
 
 @app.get("/download", response_class=HTMLResponse)
 def download_page():
