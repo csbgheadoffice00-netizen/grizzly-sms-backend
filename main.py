@@ -1109,6 +1109,8 @@ def _credit_topup(reference: str, amount_kobo: int, currency: str) -> dict:
 
 @app.post("/api/paystack/initialize")
 def paystack_initialize(body: TopupRequest, http_request: Request):
+    if os.getenv("PAYSTACK_ENABLED", "0").strip() != "1":
+        raise HTTPException(status_code=503, detail="Card top-up is not available yet. Please top up with crypto for now.")
     if not PAYSTACK_SECRET:
         raise HTTPException(status_code=503, detail="Payments are not configured yet.")
     user_id = require_user(http_request)
