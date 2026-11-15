@@ -1148,7 +1148,7 @@ def get_me_history(http_request: Request):
 # ==================== APP UPDATE, DOWNLOAD & WEB ====================
 @app.get("/api/app/version")
 def app_version():
-    return {"versionCode": 2003, "versionName": "1.3.1", "url": f"{SITE_URL}/app/fbg-sms-latest.apk", "notes": "Bug fixes and faster refunds."}
+    return {"versionCode": 2004, "versionName": "1.3.2", "url": f"{SITE_URL}/app/fbg-sms-latest.apk", "notes": "Bug fixes and faster refunds."}
 
 @app.get("/app/fbg-sms-latest.apk")
 def latest_apk():
