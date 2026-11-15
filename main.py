@@ -1012,7 +1012,7 @@ def buy_number(request: BuyRequest, http_request: Request):
         response = requests.get(BASE_URL, params=params, timeout=15)
         if "ACCESS_NUMBER" not in response.text:
             conn.close()
-            raise HTTPException(status_code=400, detail="HeroSMS is out of stock for this selection. Try another country.")
+            raise HTTPException(status_code=400, detail="FBG SMS is out of stock for this selection. Try another country.")
     except requests.exceptions.Timeout:
         conn.close()
         raise HTTPException(status_code=504, detail="HeroSMS server timed out. Please try again.")
@@ -1148,7 +1148,7 @@ def get_me_history(http_request: Request):
 # ==================== APP UPDATE, DOWNLOAD & WEB ====================
 @app.get("/api/app/version")
 def app_version():
-    return {"versionCode": 2003, "versionName": "1.3.1", "url": f"{SITE_URL}/app/fbg-sms-latest.apk", "notes": "Bug fixes and faster refunds."}
+    return {"versionCode": 2004, "versionName": "1.3.2", "url": f"{SITE_URL}/app/fbg-sms-latest.apk", "notes": "Bug fixes and faster refunds."}
 
 @app.get("/app/fbg-sms-latest.apk")
 def latest_apk():
