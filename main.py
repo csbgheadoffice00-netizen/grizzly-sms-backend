@@ -217,11 +217,11 @@ def _sweep_stale_activations():
             cursor.execute("""
                 UPDATE users u SET balance = balance + t.cost
                 FROM transactions t WHERE t.user_id = u.id AND t.status = 'PENDING'
-                AND t.service <> 'full' AND t.sms_code IS NULL AND t.created_at < NOW() - INTERVAL '8 minutes'
+                AND t.service <> 'full' AND t.sms_code IS NULL AND t.created_at < NOW() - INTERVAL '12 minutes'
             """)
             cursor.execute("""
                 UPDATE transactions SET status = 'CANCELLED'
-                WHERE status = 'PENDING' AND service <> 'full' AND sms_code IS NULL AND created_at < NOW() - INTERVAL '8 minutes'
+                WHERE status = 'PENDING' AND service <> 'full' AND sms_code IS NULL AND created_at < NOW() - INTERVAL '12 minutes'
             """)
             conn.commit()
             conn.close()
