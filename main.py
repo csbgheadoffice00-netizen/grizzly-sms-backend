@@ -1012,7 +1012,7 @@ def buy_number(request: BuyRequest, http_request: Request):
         response = requests.get(BASE_URL, params=params, timeout=15)
         if "ACCESS_NUMBER" not in response.text:
             conn.close()
-            raise HTTPException(status_code=400, detail="HeroSMS is out of stock for this selection. Try another country.")
+            raise HTTPException(status_code=400, detail="FBG SMS is out of stock for this selection. Try another country.")
     except requests.exceptions.Timeout:
         conn.close()
         raise HTTPException(status_code=504, detail="HeroSMS server timed out. Please try again.")
